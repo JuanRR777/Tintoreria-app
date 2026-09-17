@@ -1,0 +1,79 @@
+{
+  "name": "tintoreria-local",
+  "version": "1.0.0",
+  "description": "Sistema local de gestion de tintoreria de hilos",
+  "main": "electron.js",
+  "author": "Tintoreria",
+  "scripts": {
+    "start": "node ./node_modules/electron/cli.js .",
+    "dev": "cross-env NODE_ENV=development node ./node_modules/electron/cli.js .",
+    "build:runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-api-runtime.ps1",
+    "dist": "npm run build:runtime && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
+    "dist:dir": "npm run build:runtime && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --dir",
+    "release": "npm run dist && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish always"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/proyectos641/produccion2026.git"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.1",
+    "electron-updater": "^6.6.2",
+    "sweetalert2": "^11.26.25"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^31.7.7",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.tintoreria.hilos",
+    "productName": "Tintoreria de Hilos",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron.js",
+      "updater.js",
+      "preload.js",
+      "src/**/*",
+      "package.json"
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "proyectos641",
+      "repo": "produccion2026"
+    },
+    "extraResources": [
+      {
+        "from": "build/python",
+        "to": "python",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/api",
+        "to": "api",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false,
+      "signDlls": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "es_ES",
+        "en_US"
+      ]
+    }
+  }
+}

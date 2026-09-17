@@ -1,0 +1,14 @@
+{
+  "name": "tintoreria-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Worker Cloudflare + D1 para Tintoreria de Hilos",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply tintoreria --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}

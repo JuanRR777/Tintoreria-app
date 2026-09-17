@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Database
+api/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Electron / Node
+ui/node_modules/
+ui/dist/
+ui/out/
+ui/build/
+worker/node_modules/
+worker/.wrangler/
+
+# Environment
+.env
+.env.local
+*.env
+!.env.example
+!**/.env.example
+
+# Editor
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
