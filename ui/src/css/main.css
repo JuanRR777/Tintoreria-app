@@ -186,6 +186,16 @@ ul, ol { list-style: none; margin: 0; padding: 0; }
 
 .login-form { text-align: left; }
 
+.login-version {
+  margin: 20px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+}
+
 .login-error {
   background: var(--danger-light);
   color: var(--danger);
@@ -3019,4 +3029,168 @@ code {
 .swal2-confirm {
   font-weight: 500 !important;
   border-radius: 8px !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Version badge (app shell)
+   --------------------------------------------------------------------------- */
+.app-version-chip {
+  position: fixed;
+  bottom: 14px;
+  right: 18px;
+  z-index: 30;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border);
+  padding: 5px 12px;
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  pointer-events: none;
+  letter-spacing: 0.02em;
+}
+
+/* ---------------------------------------------------------------------------
+   Settings layout
+   --------------------------------------------------------------------------- */
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card-bg);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+.settings-nav-item:hover {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-nav-item.is-active {
+  border-color: var(--primary);
+  background: var(--primary-light);
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-nav-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.settings-panel {
+  min-width: 0;
+}
+
+.settings-section-head {
+  margin-bottom: 16px;
+}
+
+.settings-section-title {
+  font-family: var(--font-title);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 6px;
+  color: var(--text-primary);
+}
+
+.settings-section-lead {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 52rem;
+}
+
+.settings-app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.settings-info-card .settings-stat-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.settings-info-card .settings-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--primary);
+  line-height: 1.2;
+  margin-bottom: 8px;
+}
+
+.settings-muted {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.settings-update-status {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.settings-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-progress-track {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.settings-progress-bar {
+  height: 100%;
+  width: 0;
+  background: var(--primary);
+  transition: width 0.2s ease;
+}
+
+.settings-update-progress {
+  margin-bottom: 16px;
 }

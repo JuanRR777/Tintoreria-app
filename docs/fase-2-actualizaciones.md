@@ -164,8 +164,16 @@ Si no hay release en GitHub o el repo/token está mal configurado, verás un men
 
 ---
 
+## Error 404 al buscar actualizaciones
+
+Si ves `404` y una URL como `.../Tintoreria-app/releases.atom`, el repo es **privado**. GitHub no deja a la app instalada leer releases sin login.
+
+**Solución (recomendada):** en GitHub → repo **Tintoreria-app** → **Settings** → al final **Danger Zone** → **Change repository visibility** → **Public**. No hace falta reinstalar la app; vuelve a **Buscar actualizaciones**.
+
+El token `GH_TOKEN` solo sirve en **tu PC** para `npm run release`; **no** va en los PCs de planta.
+
 ## Notas
 
-- **Repo privado:** además de `GH_TOKEN` al publicar, en el cliente puede hacer falta configurar acceso a releases privadas (token en el updater); para Fase 2 inicial se asume repo **público** o releases públicas.
+- **Repo privado:** las actualizaciones automáticas **no funcionan** en planta salvo meter un token en la app (no recomendado). Usa repo **público** o sigue instalando el `.exe` a mano.
 - **Sin firma de código:** igual que Fase 1; SmartScreen puede avisar en cada instalador descargado.
 - **Cambios grandes** (Python embed, estructura NSIS): si algún día el updater falla, siempre puedes volver a instalar el `.exe` manualmente.

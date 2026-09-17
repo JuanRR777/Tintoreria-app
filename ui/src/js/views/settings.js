@@ -1,39 +1,63 @@
 import { auth, sync as syncApi } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
+import { getAppVersion, formatVersionLabel } from '../appVersion.js'
+
+const SETTINGS_SECTIONS = [
+  { id: 'password', title: 'Seguridad', desc: 'Contrasena de tu cuenta' },
+  { id: 'users', title: 'Usuarios', desc: 'Cuentas y roles' },
+  { id: 'sync', title: 'Sincronizacion', desc: 'Cola con la nube' },
+  { id: 'app', title: 'Aplicacion', desc: 'Version y actualizaciones' },
+]
+
+let activeSettingsSection = null
 
 export async function showView(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
         <h1 class="page-title">Configuracion</h1>
-        <p class="page-subtitle">Usuarios, seguridad y sincronizacion</p>
+        <p class="page-subtitle">Seguridad, usuarios, sincronizacion y actualizaciones del sistema</p>
       </div>
     </div>
 
-    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
-      <button class="btn btn-primary" data-section="password">Cambiar contrasena</button>
-      <button class="btn btn-secondary" data-section="users">Usuarios</button>
-      <button class="btn btn-secondary" data-section="sync">Sincronizacion</button>
-      <button class="btn btn-secondary" data-section="app">Aplicacion</button>
+    <div class="settings-layout">
+      <nav class="settings-nav" id="settings-nav" aria-label="Secciones de configuracion">
+        ${SETTINGS_SECTIONS.map((s) => `
+          <button type="button" class="settings-nav-item" data-section="${s.id}">
+            <span class="settings-nav-title">${s.title}</span>
+            <span class="settings-nav-desc">${s.desc}</span>
+          </button>
+        `).join('')}
+      </nav>
+      <div class="settings-panel">
+        <div id="settings-section"></div>
+      </div>
     </div>
-    <div id="settings-section"></div>
   `
 
-  container.querySelectorAll('[data-section]').forEach(btn => {
+  const nav = container.querySelector('#settings-nav')
+  nav?.querySelectorAll('[data-section]').forEach((btn) => {
     btn.onclick = () => {
-      container.querySelectorAll('[data-section]').forEach(b => b.className = 'btn btn-secondary')
-      btn.className = 'btn btn-primary'
+      nav.querySelectorAll('.settings-nav-item').forEach((b) => b.classList.remove('is-active'))
+      btn.classList.add('is-active')
       renderSection(btn.dataset.section)
     }
   })
 
-  renderSection('password')
+  const first = nav?.querySelector('[data-section="app"]') || nav?.querySelector('[data-section]')
+  first?.classList.add('is-active')
+  renderSection(first?.dataset.section || 'password')
 }
 
 function renderSection(section) {
   const c = document.getElementById('settings-section')
   if (!c) return
+  if (activeSettingsSection === 'app' && c._cleanupUpdates) {
+    c._cleanupUpdates()
+    c._cleanupUpdates = null
+  }
+  activeSettingsSection = section
   if (section === 'password') renderChangePassword(c)
   else if (section === 'users') renderUsers(c)
   else if (section === 'sync') renderSync(c)
@@ -44,42 +68,75 @@ function renderSection(section) {
 // Actualizaciones (Electron instalado)
 // ---------------------------------------------------------------------------
 
-function renderAppUpdates(c) {
+function formatUpdaterError(raw) {
+  const text = String(raw || '')
+  if (text.includes('404') && text.includes('releases')) {
+    return (
+      'No se puede leer las releases de GitHub (error 404). ' +
+      'Si el repo Tintoreria-app es PRIVADO, ponlo PUBLICO en GitHub ' +
+      '(Settings del repo → Change visibility) o instala manualmente el .exe. ' +
+      'Luego vuelve a pulsar Buscar actualizaciones.'
+    )
+  }
+  if (text.length > 280) {
+    return 'Error al conectar con GitHub Releases. Revisa que el repo sea publico y que exista una release con latest.yml.'
+  }
+  return text || 'Error al buscar actualizaciones.'
+}
+
+async function renderAppUpdates(c) {
   const updates = window.electron?.updates
+  const version = await getAppVersion()
+  const versionLabel = formatVersionLabel(version)
+
   if (!updates) {
     c.innerHTML = `
-      <div class="card" style="max-width:560px">
+      <div class="settings-section-head">
+        <h2 class="settings-section-title">Aplicacion de escritorio</h2>
+        <p class="settings-section-lead">Las actualizaciones automaticas estan disponibles solo en el instalador (.exe).</p>
+      </div>
+      <div class="card settings-info-card">
         <div class="card-body">
-          <p style="color:var(--text-muted);font-size:13px;margin:0">
-            Esta pantalla solo aplica a la aplicacion de escritorio instalada (.exe).
-          </p>
+          <p class="settings-muted">${versionLabel}</p>
         </div>
       </div>`
     return
   }
 
   c.innerHTML = `
-    <div class="card" style="max-width:560px">
-      <div class="card-header">
-        <h3 class="card-title">Version de la aplicacion</h3>
-      </div>
-      <div class="card-body">
-        <p style="margin:0 0 16px;font-size:14px">
-          Instalada: <strong id="app-version-label">...</strong>
-        </p>
-        <p id="app-update-status" style="color:var(--text-muted);font-size:13px;margin:0 0 16px">
-          Comprueba si hay una version nueva en el servidor de actualizaciones.
-        </p>
-        <div id="app-update-progress" style="display:none;margin-bottom:16px">
-          <div class="form-label">Descargando...</div>
-          <div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">
-            <div id="app-update-bar" style="height:100%;width:0;background:var(--primary);transition:width .2s"></div>
-          </div>
+    <div class="settings-section-head">
+      <h2 class="settings-section-title">Aplicacion y actualizaciones</h2>
+      <p class="settings-section-lead">Version instalada y comprobacion de releases en GitHub (Tintoreria-app).</p>
+    </div>
+
+    <div class="settings-app-grid">
+      <div class="card settings-info-card">
+        <div class="card-body">
+          <div class="settings-stat-label">Version instalada</div>
+          <div class="settings-stat-value" id="app-version-label">...</div>
+          <p class="settings-muted">Tambien visible en el login y en la esquina inferior derecha.</p>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-primary btn-sm" id="btn-check-updates">Buscar actualizaciones</button>
-          <button class="btn btn-secondary btn-sm" id="btn-download-update" style="display:none">Descargar</button>
-          <button class="btn btn-primary btn-sm" id="btn-install-update" style="display:none">Reiniciar e instalar</button>
+      </div>
+
+      <div class="card settings-update-card">
+        <div class="card-header">
+          <h3 class="card-title">Actualizaciones</h3>
+        </div>
+        <div class="card-body">
+          <p id="app-update-status" class="settings-update-status">
+            Comprueba si hay una version nueva publicada en GitHub Releases.
+          </p>
+          <div id="app-update-progress" class="settings-update-progress" style="display:none">
+            <div class="form-label">Descargando...</div>
+            <div class="settings-progress-track">
+              <div id="app-update-bar" class="settings-progress-bar"></div>
+            </div>
+          </div>
+          <div class="settings-update-actions">
+            <button class="btn btn-primary btn-sm" id="btn-check-updates">Buscar actualizaciones</button>
+            <button class="btn btn-secondary btn-sm" id="btn-download-update" style="display:none">Descargar</button>
+            <button class="btn btn-primary btn-sm" id="btn-install-update" style="display:none">Reiniciar e instalar</button>
+          </div>
         </div>
       </div>
     </div>
@@ -95,10 +152,8 @@ function renderAppUpdates(c) {
   let pendingVersion = null
   let unsubscribe = null
 
-  updates.getVersion().then((v) => {
-    const el = document.getElementById('app-version-label')
-    if (el) el.textContent = v || '—'
-  })
+  const versionEl = document.getElementById('app-version-label')
+  if (versionEl) versionEl.textContent = version === 'desarrollo' ? 'Desarrollo' : `v${version}`
 
   unsubscribe = updates.onStatus((payload) => {
     if (!payload?.phase) return
@@ -134,12 +189,14 @@ function renderAppUpdates(c) {
         btnDownload.disabled = false
         progressWrap.style.display = 'none'
         break
-      case 'error':
-        statusEl.textContent = payload.message || 'Error al buscar actualizaciones.'
+      case 'error': {
+        const msg = formatUpdaterError(payload.message)
+        statusEl.textContent = msg
         btnCheck.disabled = false
         btnDownload.disabled = false
-        toast.error(statusEl.textContent)
+        toast.error(msg)
         break
+      }
       default:
         break
     }
@@ -151,12 +208,14 @@ function renderAppUpdates(c) {
     try {
       const result = await updates.check()
       if (!result?.ok) {
-        statusEl.textContent = result?.error || 'No se pudo comprobar actualizaciones.'
-        toast.error(statusEl.textContent)
+        const msg = formatUpdaterError(result?.error)
+        statusEl.textContent = msg
+        toast.error(msg)
       }
     } catch (err) {
-      statusEl.textContent = err.message
-      toast.error(err.message)
+      const msg = formatUpdaterError(err.message)
+      statusEl.textContent = msg
+      toast.error(msg)
     } finally {
       btnCheck.disabled = false
     }
@@ -191,6 +250,10 @@ function renderAppUpdates(c) {
 
 function renderChangePassword(c) {
   c.innerHTML = `
+    <div class="settings-section-head">
+      <h2 class="settings-section-title">Seguridad</h2>
+      <p class="settings-section-lead">Actualiza la contrasena de tu cuenta de acceso.</p>
+    </div>
     <div class="card" style="max-width:480px">
       <div class="card-header"><h3 class="card-title">Cambiar contrasena</h3></div>
       <div class="card-body">
@@ -242,6 +305,10 @@ function renderChangePassword(c) {
 
 async function renderUsers(c) {
   c.innerHTML = `
+    <div class="settings-section-head">
+      <h2 class="settings-section-title">Usuarios</h2>
+      <p class="settings-section-lead">Administra cuentas, roles y acceso al sistema.</p>
+    </div>
     <div class="card">
       <div class="card-header">
         <h3 class="card-title">Usuarios del sistema</h3>
@@ -384,12 +451,21 @@ async function openUserForm(userId, onSuccess) {
 // ---------------------------------------------------------------------------
 
 async function renderSync(c) {
-  c.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>'
+  c.innerHTML = `
+    <div class="settings-section-head">
+      <h2 class="settings-section-title">Sincronizacion</h2>
+      <p class="settings-section-lead">Estado de la cola hacia la nube.</p>
+    </div>
+    <div class="loading-state"><div class="spinner"></div></div>`
   try {
     const status = await syncApi.status()
     const queue  = await syncApi.queue()
 
     c.innerHTML = `
+      <div class="settings-section-head">
+        <h2 class="settings-section-title">Sincronizacion</h2>
+        <p class="settings-section-lead">Estado de la cola hacia la nube.</p>
+      </div>
       <div class="card" style="max-width:600px">
         <div class="card-header">
           <h3 class="card-title">Estado de sincronizacion</h3>
@@ -425,6 +501,11 @@ async function renderSync(c) {
       })
     }
   } catch (err) {
-    c.innerHTML = `<div class="empty-state"><p>${err.message}</p></div>`
+    c.innerHTML = `
+      <div class="settings-section-head">
+        <h2 class="settings-section-title">Sincronizacion</h2>
+        <p class="settings-section-lead">Estado de la cola hacia la nube.</p>
+      </div>
+      <div class="empty-state"><p>${err.message}</p></div>`
   }
 }

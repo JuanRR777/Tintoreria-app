@@ -5,6 +5,7 @@
 import { auth, stock, setToken, clearToken, setApiBase, getToken } from './api.js'
 import { initRouter, navigate }  from './router.js'
 import { toast }                 from './components/toast.js'
+import { refreshVersionLabels }  from './appVersion.js'
 
 const TOKEN_KEY = 'tintoreria_token'
 const SIDEBAR_COLLAPSED_KEY = 'tintoreria_sidebar_collapsed'
@@ -39,6 +40,8 @@ async function init() {
 
   // Login form
   document.getElementById('login-form')?.addEventListener('submit', handleLogin)
+
+  await refreshVersionLabels()
 
   // Verificar token existente
   const savedToken = localStorage.getItem(TOKEN_KEY)
@@ -106,12 +109,16 @@ async function logout() {
 function showLogin() {
   document.getElementById('login-screen').style.display  = 'flex'
   document.getElementById('app').style.display           = 'none'
+  document.getElementById('app-version-chip')?.setAttribute('hidden', '')
   document.getElementById('username')?.focus()
+  refreshVersionLabels()
 }
 
 function showApp(user) {
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app').style.display          = 'flex'
+  document.getElementById('app-version-chip')?.removeAttribute('hidden')
+  refreshVersionLabels()
 
   // Actualizar info de usuario en sidebar
   const nameEl = document.getElementById('user-name')
