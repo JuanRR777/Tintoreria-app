@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/proyectos641/produccion2026.git"
+    "url": "https://github.com/JuanRR777/Tintoreria-app.git"
   },
   "dependencies": {
     "chart.js": "^4.4.1",
@@ -41,8 +41,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "proyectos641",
-      "repo": "produccion2026"
+      "owner": "JuanRR777",
+      "repo": "Tintoreria-app"
     },
     "extraResources": [
       {

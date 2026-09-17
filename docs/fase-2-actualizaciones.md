@@ -119,7 +119,7 @@ En `ui/package.json`:
 }
 ```
 
-Por defecto el proyecto usa `proyectos641/produccion2026`; cámbialo si tu repo tiene otro nombre.
+Repo configurado: **`JuanRR777/Tintoreria-app`** (`https://github.com/JuanRR777/Tintoreria-app.git`).
 
 ---
 
