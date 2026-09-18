@@ -2,6 +2,7 @@ import { auth, sync as syncApi } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
 import { getAppVersion, formatVersionLabel } from '../appVersion.js'
+import { setPageHeader } from '../layout.js'
 
 const SETTINGS_SECTIONS = [
   { id: 'password', title: 'Seguridad', desc: 'Contrasena de tu cuenta' },
@@ -13,14 +14,11 @@ const SETTINGS_SECTIONS = [
 let activeSettingsSection = null
 
 export async function showView(container) {
+  setPageHeader({
+    title: 'Configuracion',
+    subtitle: 'Seguridad, usuarios, sincronizacion y actualizaciones del sistema',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Configuracion</h1>
-        <p class="page-subtitle">Seguridad, usuarios, sincronizacion y actualizaciones del sistema</p>
-      </div>
-    </div>
-
     <div class="settings-layout">
       <nav class="settings-nav" id="settings-nav" aria-label="Secciones de configuracion">
         ${SETTINGS_SECTIONS.map((s) => `

@@ -6,6 +6,14 @@ import { auth, stock, setToken, clearToken, setApiBase, getToken } from './api.j
 import { initRouter, navigate }  from './router.js'
 import { toast }                 from './components/toast.js'
 import { refreshVersionLabels }  from './appVersion.js'
+import { paintUserChip }         from './layout.js'
+import {
+  setSession,
+  clearSession,
+  sessionDisplayName,
+  sessionRoleLabel,
+  sessionInitials,
+} from './session.js'
 
 const TOKEN_KEY = 'tintoreria_token'
 const SIDEBAR_COLLAPSED_KEY = 'tintoreria_sidebar_collapsed'
@@ -37,6 +45,11 @@ async function init() {
 
   // Boton logout
   document.getElementById('btn-logout')?.addEventListener('click', logout)
+
+  document.getElementById('btn-app-settings')?.addEventListener('click', () => navigate('settings'))
+  document.getElementById('btn-app-notif')?.addEventListener('click', () => {
+    toast.info('No hay notificaciones nuevas')
+  })
 
   // Login form
   document.getElementById('login-form')?.addEventListener('submit', handleLogin)
@@ -99,6 +112,7 @@ async function logout() {
   try { await auth.logout() } catch { /* ignorar */ }
   localStorage.removeItem(TOKEN_KEY)
   clearToken()
+  clearSession()
   showLogin()
 }
 
@@ -107,6 +121,7 @@ async function logout() {
 // ---------------------------------------------------------------------------
 
 function showLogin() {
+  clearSession()
   document.getElementById('login-screen').style.display  = 'flex'
   document.getElementById('app').style.display           = 'none'
   document.getElementById('app-version-chip')?.setAttribute('hidden', '')
@@ -115,16 +130,19 @@ function showLogin() {
 }
 
 function showApp(user) {
+  setSession(user)
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app').style.display          = 'flex'
   document.getElementById('app-version-chip')?.removeAttribute('hidden')
   refreshVersionLabels()
 
-  // Actualizar info de usuario en sidebar
   const nameEl = document.getElementById('user-name')
   const roleEl = document.getElementById('user-role')
-  if (nameEl) nameEl.textContent = user?.full_name || user?.username || 'Usuario'
-  if (roleEl) roleEl.textContent = user?.role_name || ''
+  const avatarEl = document.getElementById('user-avatar')
+  if (nameEl) nameEl.textContent = sessionDisplayName()
+  if (roleEl) roleEl.textContent = sessionRoleLabel()
+  if (avatarEl) avatarEl.textContent = sessionInitials()
+  paintUserChip()
 
   // Cargar dashboard como vista inicial
   navigate('dashboard')

@@ -1,14 +1,12 @@
 import { reports, sync as syncApi } from '../api.js'
+import { setPageHeader } from '../layout.js'
 
 export async function showView(container) {
+  setPageHeader({
+    title: 'Reportes',
+    subtitle: 'Consumo de quimicos e historial de produccion',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Reportes</h1>
-        <p class="page-subtitle">Consumo de quimicos e historial de produccion</p>
-      </div>
-    </div>
-
     <div class="toolbar" style="margin-bottom:16px">
       <label class="form-label" style="margin:0;align-self:center">Desde:</label>
       <input type="date" id="rpt-from" class="form-input" style="width:160px">

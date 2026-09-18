@@ -1,5 +1,6 @@
 import { reports } from '../api.js'
 import { navigate } from '../router.js'
+import { setPageHeader } from '../layout.js'
 
 const TYPE_LABELS = {
   acido: 'Acido', reactivo: 'Reactivo', directo: 'Directo', auxiliar: 'Auxiliar',
@@ -34,13 +35,11 @@ let charts = []
 
 export async function showView(container) {
   destroyCharts()
+  setPageHeader({
+    title: 'Dashboard',
+    subtitle: 'Resumen operativo de inventario, compras y produccion',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Dashboard</h1>
-        <p class="page-subtitle">Resumen operativo de inventario, compras y produccion</p>
-      </div>
-    </div>
     <div id="dash-content"><div class="loading-state"><div class="spinner"></div><span>Cargando datos...</span></div></div>
   `
 
@@ -91,7 +90,7 @@ function renderDashboard(d) {
       ${kpiCard({
         tone: (d.active_processes || 0) > 0 ? 'success' : 'neutral',
         nav: 'processes',
-        label: 'Procesos activos',
+        label: 'Procesos A',
         value: d.active_processes ?? 0,
         hint: 'En ejecucion ahora',
         icon: ICON.clock,
@@ -99,7 +98,7 @@ function renderDashboard(d) {
       ${kpiCard({
         tone: 'warning',
         nav: 'processes',
-        label: 'Completados del mes',
+        label: 'Completados',
         value: d.completed_this_month ?? 0,
         hint: 'Lotes finalizados',
         icon: ICON.check,
@@ -127,44 +126,46 @@ function renderDashboard(d) {
         </div>
       </section>
 
-      <section class="dash-card">
-        <header class="dash-card-head">
-          <div>
-            <h3>Estado de inventario</h3>
-            <p>Disponible, espera y pedido</p>
+      <div class="dash-charts-row">
+        <section class="dash-card">
+          <header class="dash-card-head">
+            <div>
+              <h3>Estado de inventario</h3>
+              <p>Disponible, espera y pedido</p>
+            </div>
+          </header>
+          <div class="dash-chart-wrap is-donut">
+            <canvas id="chart-procurement"></canvas>
           </div>
-        </header>
-        <div class="dash-chart-wrap is-donut">
-          <canvas id="chart-procurement"></canvas>
-        </div>
-      </section>
+        </section>
 
-      <section class="dash-card">
-        <header class="dash-card-head">
-          <div>
-            <h3>Tipos de quimico</h3>
-            <p>Composicion del catalogo</p>
+        <section class="dash-card">
+          <header class="dash-card-head">
+            <div>
+              <h3>Tipos de quimico</h3>
+              <p>Composicion del catalogo</p>
+            </div>
+          </header>
+          <div class="dash-chart-wrap is-donut">
+            <canvas id="chart-types"></canvas>
           </div>
-        </header>
-        <div class="dash-chart-wrap is-donut">
-          <canvas id="chart-types"></canvas>
-        </div>
-      </section>
+        </section>
+
+        <section class="dash-card">
+          <header class="dash-card-head">
+            <div>
+              <h3>Mayor consumo</h3>
+              <p>Salidas de inventario · 7 dias</p>
+            </div>
+          </header>
+          <div class="dash-chart-wrap">
+            <canvas id="chart-consumption"></canvas>
+          </div>
+        </section>
+      </div>
     </div>
 
     <div class="dash-bottom">
-      <section class="dash-card">
-        <header class="dash-card-head">
-          <div>
-            <h3>Mayor consumo</h3>
-            <p>Salidas de inventario · 7 dias</p>
-          </div>
-        </header>
-        <div class="dash-chart-wrap">
-          <canvas id="chart-consumption"></canvas>
-        </div>
-      </section>
-
       <section class="dash-card">
         <header class="dash-card-head">
           <div>

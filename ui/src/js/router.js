@@ -12,6 +12,7 @@ import { showView as machinesView }   from './views/machines.js'
 import { showView as reportsView }    from './views/reports.js'
 import { showView as settingsView }   from './views/settings.js'
 import { showView as requestsView }   from './views/requests.js'
+import { setPageHeader } from './layout.js'
 
 const VIEWS = {
   dashboard: dashboardView,
@@ -52,6 +53,7 @@ export async function navigate(viewName, params = {}) {
   }
 
   _container.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div>'
+  setPageHeader({ title: '', subtitle: '', actionsHtml: '' })
   _currentView = viewName
 
   if (_onViewChange) _onViewChange(viewName)

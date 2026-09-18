@@ -1,6 +1,7 @@
 import { chemicals as api, stock } from '../api.js'
 import { toast }      from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
+import { setPageHeader } from '../layout.js'
 
 const TYPE_LABELS = {
   acido:'Acido', reactivo:'Reactivo', directo:'Directo', auxiliar:'Auxiliar',
@@ -24,20 +25,16 @@ const ICO = {
 let reloadList = async () => {}
 
 export async function showView(container, params = {}) {
+  setPageHeader({
+    title: 'Quimicos',
+    subtitle: 'Inventario de materias primas y auxiliares',
+    actionsHtml: `
+      <button class="btn btn-primary" id="btn-new-chemical">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Nuevo quimico
+      </button>`,
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Quimicos</h1>
-        <p class="page-subtitle">Inventario de materias primas y auxiliares</p>
-      </div>
-      <div class="page-actions">
-        <button class="btn btn-primary" id="btn-new-chemical">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Nuevo quimico
-        </button>
-      </div>
-    </div>
-
     <div class="chem-summary" id="chem-summary"></div>
 
     <div class="toolbar">

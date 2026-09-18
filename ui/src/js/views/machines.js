@@ -1,16 +1,14 @@
 import { machines as machinesApi, scales as scalesApi } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
+import { setPageHeader } from '../layout.js'
 
 export async function showView(container) {
+  setPageHeader({
+    title: 'Maquinas y Basculas',
+    subtitle: 'Equipo de tintura y perifericos de pesaje',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Maquinas y Basculas</h1>
-        <p class="page-subtitle">Equipo de tintura y perifericos de pesaje</p>
-      </div>
-    </div>
-
     <div style="display:flex;gap:12px;margin-bottom:16px">
       <button class="btn ${_tab==='machines'?'btn-primary':'btn-secondary'}" id="tab-machines" data-tab="machines">Maquinas</button>
       <button class="btn ${_tab==='scales'?'btn-primary':'btn-secondary'}"   id="tab-scales"   data-tab="scales">Basculas</button>

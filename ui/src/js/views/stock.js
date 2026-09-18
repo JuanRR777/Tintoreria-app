@@ -1,4 +1,5 @@
 import { chemicals as chemicalsApi, requests as requestsApi, stock } from '../api.js'
+import { setPageHeader } from '../layout.js'
 
 const TYPE_LABELS = {
   acido: 'Acido', reactivo: 'Reactivo', directo: 'Directo', auxiliar: 'Auxiliar',
@@ -72,13 +73,11 @@ const CHEM_ART = {
 }
 
 export async function showView(container) {
+  setPageHeader({
+    title: 'Stock',
+    subtitle: 'Estado de inventario, alertas y movimientos de quimicos',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Stock</h1>
-        <p class="page-subtitle">Estado de inventario, alertas y movimientos de quimicos</p>
-      </div>
-    </div>
     <div id="stock-content"><div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div></div>
   `
   await loadStock()

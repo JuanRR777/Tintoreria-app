@@ -1,5 +1,6 @@
 import { requests as api, peekCache } from '../api.js'
 import { showError, showLoading, showSuccess, showWarning } from '../components/swal.js'
+import { setPageHeader } from '../layout.js'
 
 const WAREHOUSE = '10502'
 const ITEMS_PER_PAGE = 3
@@ -8,21 +9,17 @@ const ICON_CHECK = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" 
 const ICON_CHEVRON = `<svg class="req-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`
 
 export async function showView(container) {
+  setPageHeader({
+    title: 'Solicitudes',
+    subtitle: `Trazabilidad de compras de tintoreria · bodega ${WAREHOUSE}`,
+    actionsHtml: `
+      <input type="file" id="file-soc" accept=".csv,text/csv" hidden>
+      <input type="file" id="file-occ" accept=".csv,text/csv" hidden>
+      <button class="btn btn-secondary" id="btn-import-soc">Importar SOC</button>
+      <button class="btn btn-secondary" id="btn-import-occ">Importar OCC</button>
+      <button class="btn btn-secondary" id="btn-sync-catalog">Actualizar inventario</button>`,
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Solicitudes</h1>
-        <p class="page-subtitle">Trazabilidad de compras de tintoreria · bodega ${WAREHOUSE}</p>
-      </div>
-      <div class="page-actions">
-        <input type="file" id="file-soc" accept=".csv,text/csv" hidden>
-        <input type="file" id="file-occ" accept=".csv,text/csv" hidden>
-        <button class="btn btn-secondary" id="btn-import-soc">Importar SOC</button>
-        <button class="btn btn-secondary" id="btn-import-occ">Importar OCC</button>
-        <button class="btn btn-secondary" id="btn-sync-catalog">Actualizar inventario</button>
-      </div>
-    </div>
-
     <div class="stats-grid" style="margin-bottom:20px">
       <div class="stat-card">
         <div class="stat-info">

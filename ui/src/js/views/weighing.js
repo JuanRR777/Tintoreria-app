@@ -6,18 +6,17 @@ import { processes as api, scales, openScaleSocket } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { confirm } from '../components/modal.js'
 import { navigate } from '../router.js'
+import { setPageHeader } from '../layout.js'
 
 let _ws       = null
 let _scaleId  = null
 
 export async function showView(container, params = {}) {
+  setPageHeader({
+    title: 'Pesaje',
+    subtitle: 'Control de dosificacion con bascula en tiempo real',
+  })
   container.innerHTML = `
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Pesaje</h1>
-        <p class="page-subtitle">Control de dosificacion con bascula en tiempo real</p>
-      </div>
-    </div>
     <div id="weighing-content"></div>
   `
 
