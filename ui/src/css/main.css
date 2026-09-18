@@ -2287,18 +2287,11 @@ code {
 
 .inv-type-band .inv-type-dot { box-shadow: none; }
 
-#inv-general-list .inv-chem-grid {
-  padding-top: 8px;
-}
-
 .inv-side {
   min-width: 0;
-  min-height: 0;
-  height: 100%;
   background: var(--surface-2);
   border: 0.5px solid var(--border);
   border-radius: 12px;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -2324,11 +2317,9 @@ code {
 }
 
 .inv-side-body {
-  flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  min-height: 0;
   padding: 8px;
 }
 
@@ -2338,10 +2329,11 @@ code {
 }
 
 #inv-general-list {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+  min-width: 0;
+}
+
+#inv-general-list .inv-chem-grid {
+  padding-top: 8px;
 }
 
 .inv-pager {
@@ -2393,8 +2385,15 @@ code {
   border-top: 0.5px solid var(--border);
 }
 
-.inv-board .inv-pager {
+.inv-board-pager .inv-pager,
+.inv-side-pager .inv-pager {
   border-top: 0.5px solid var(--border);
+  margin-top: 0;
+}
+
+.inv-board-pager:empty,
+.inv-side-pager:empty {
+  display: none;
 }
 
 .inv-move {
@@ -2478,8 +2477,6 @@ code {
   border-radius: 12px;
   overflow: hidden;
   min-width: 0;
-  min-height: 0;
-  height: 100%;
   display: flex;
   flex-direction: column;
 }

@@ -15,13 +15,24 @@ let currentTab = 'general'
 let generalType = ''
 let generalAll = []
 
-const PAGE_SIZE = {
+const PAGE_SIZE_BASE = {
   general: 12,
   critical: 8,
   expiring: 8,
   transit: 8,
   movements: 10,
 }
+
+/** Tamaño efectivo por pestaña (se recalcula al pintar y al redimensionar). */
+const PAGE_SIZE = { ...PAGE_SIZE_BASE }
+
+const VIEWPORT_PAGE = {
+  mini: { minCell: 128, gap: 8, rowHeight: 92, bottomMargin: 48, min: 4, max: 200 },
+  chem: { minCell: 168, gap: 10, rowHeight: 175, bottomMargin: 72, min: 6, max: 200 },
+  list: { rowHeight: 68, bottomMargin: 48, min: 5, max: 100 },
+}
+
+let viewportPageTimer = null
 
 const pages = {
   general: 1,
@@ -251,6 +262,7 @@ function renderStock(s, container) {
             <div class="inv-type-filters" id="inv-type-filters"></div>
           </div>
           <div id="inv-general-list"><div class="loading-state"><div class="spinner"></div><span>Cargando inventario...</span></div></div>
+          <div id="inv-general-pager" class="inv-board-pager"></div>
         </section>
         <aside class="inv-side">
           <header class="inv-side-head">
@@ -260,6 +272,7 @@ function renderStock(s, container) {
           <div id="movements-list" class="inv-side-body">
             <div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div>
           </div>
+          <div id="inv-movements-pager" class="inv-side-pager"></div>
         </aside>
       </div>
     </div>
@@ -271,7 +284,7 @@ function renderStock(s, container) {
         title: 'Stock crítico',
         subtitle: 'Requiere reposición inmediata',
         count: low.length,
-        body: '<div id="inv-critical-list"></div>',
+        body: '<div id="inv-critical-list"></div><div id="inv-critical-pager" class="inv-board-pager"></div>',
       })}
     </div>
 
@@ -282,7 +295,7 @@ function renderStock(s, container) {
         title: 'Por vencer',
         subtitle: 'Próximos 30 días',
         count: expiring.length,
-        body: '<div id="inv-expiring-list"></div>',
+        body: '<div id="inv-expiring-list"></div><div id="inv-expiring-pager" class="inv-board-pager"></div>',
       })}
     </div>
 
@@ -293,7 +306,7 @@ function renderStock(s, container) {
         title: 'En tránsito',
         subtitle: 'Aún falta completar entrada a bodega',
         count: pending.length,
-        body: '<div id="inv-transit-list"></div>',
+        body: '<div id="inv-transit-list"></div><div id="inv-transit-pager" class="inv-board-pager"></div>',
       })}
     </div>
   `
@@ -313,6 +326,7 @@ function renderStock(s, container) {
   paintTransit()
   loadGeneralList()
   loadMovements()
+  bindStockViewportPaging()
 }
 
 function tabButton(id, label, count) {
@@ -346,6 +360,116 @@ function setTab(container, tab) {
   container.querySelectorAll('[data-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.panel !== tab
   })
+}
+
+function bindStockViewportPaging() {
+  if (window.__stockViewportPagingBound) return
+  window.__stockViewportPagingBound = true
+  window.addEventListener('resize', () => scheduleViewportPageRefresh())
+}
+
+function scheduleViewportPageRefresh() {
+  clearTimeout(viewportPageTimer)
+  viewportPageTimer = setTimeout(refreshViewportPageSizes, 120)
+}
+
+function availableHeightFromTop(topPx, bottomMargin) {
+  return Math.max(0, window.innerHeight - topPx - bottomMargin)
+}
+
+function gridFitCount(width, available, opts) {
+  if (available < opts.rowHeight * 0.75) return opts.min
+  const cols = Math.max(1, Math.floor((width + opts.gap) / (opts.minCell + opts.gap)))
+  const rows = Math.max(1, Math.floor(available / opts.rowHeight))
+  return Math.max(opts.min, Math.min(opts.max, cols * rows))
+}
+
+/** Cuántos ítems caben en la ventana (sin scroll interno). */
+function countViewportFit(key) {
+  let top = 0
+  let width = 800
+  let mode = 'mini'
+
+  if (key === 'general') {
+    mode = 'chem'
+    const toolbar = document.querySelector('[data-panel="general"]:not([hidden]) .inv-board-toolbar')
+    const list = document.getElementById('inv-general-list')
+    const anchor = toolbar || list
+    if (!anchor) return PAGE_SIZE_BASE[key]
+    top = anchor.getBoundingClientRect().bottom
+    width = list?.clientWidth || anchor.clientWidth || width
+  } else if (key === 'movements') {
+    mode = 'list'
+    const head = document.querySelector('.inv-side-head')
+    const list = document.getElementById('movements-list')
+    const anchor = head || list
+    if (!anchor) return PAGE_SIZE_BASE[key]
+    top = anchor.getBoundingClientRect().bottom
+    width = list?.clientWidth || 320
+  } else {
+    const head = document.querySelector(`[data-panel="${key}"]:not([hidden]) .inv-board-head`)
+    const list = document.getElementById(`inv-${key}-list`)
+    const anchor = head || list
+    if (!anchor) return PAGE_SIZE_BASE[key]
+    top = anchor.getBoundingClientRect().bottom
+    width = list?.clientWidth || anchor.clientWidth || width
+  }
+
+  const opts = mode === 'chem' ? VIEWPORT_PAGE.chem : mode === 'list' ? VIEWPORT_PAGE.list : VIEWPORT_PAGE.mini
+  const available = availableHeightFromTop(top, opts.bottomMargin)
+  if (mode === 'list') {
+    return Math.max(opts.min, Math.min(opts.max, Math.floor(available / opts.rowHeight) || opts.min))
+  }
+  return gridFitCount(width, available, opts)
+}
+
+/**
+ * Si todo cabe en pantalla → una página (sin paginador).
+ * Si no cabe → tamaño fijo por pestaña (paginación clásica, reemplaza contenido).
+ */
+function resolvePageSize(key) {
+  const total = (cache[key] || []).length
+  if (!total) return PAGE_SIZE_BASE[key]
+  const fit = countViewportFit(key)
+  if (total <= fit) return total
+  return PAGE_SIZE_BASE[key]
+}
+
+function refreshViewportPageSizes() {
+  // Inventario general: paginación fija (evita mezclar páginas al recalcular alto).
+  const keys =
+    currentTab === 'general'
+      ? ['movements']
+      : currentTab === 'transit'
+        ? ['transit']
+        : [currentTab]
+
+  let changed = false
+  for (const key of keys) {
+    const next = resolvePageSize(key)
+    if (next === PAGE_SIZE[key]) continue
+    PAGE_SIZE[key] = next
+    const total = (cache[key] || []).length
+    const totalPages = Math.max(1, Math.ceil(total / next))
+    if ((pages[key] || 1) > totalPages) pages[key] = totalPages
+    changed = true
+  }
+
+  if (!changed) return
+  if (currentTab === 'general') {
+    renderGeneralCards()
+    paintMovements()
+  } else {
+    paintKey(currentTab)
+  }
+}
+
+function scrollStockListIntoView(anchorEl) {
+  const main = document.querySelector('.main-content')
+  if (!main || !anchorEl) return
+  const mainTop = main.getBoundingClientRect().top
+  const elTop = anchorEl.getBoundingClientRect().top
+  main.scrollTop += elTop - mainTop - 12
 }
 
 function bindGeneralSearch() {
@@ -432,19 +556,41 @@ function chemKind(c) {
   return 'disponible'
 }
 
+function scrubOrphanStockNodes(boardSelector, listId) {
+  const board = document.querySelector(boardSelector)
+  const list = document.getElementById(listId)
+  if (!board || !list) return
+  board.querySelectorAll('.inv-type-band, .inv-chem-grid, .inv-pager, .inv-mini-grid').forEach((el) => {
+    if (!list.contains(el)) el.remove()
+  })
+}
+
+function setPagerHost(hostId, key, page, totalPages) {
+  const host = document.getElementById(hostId)
+  if (!host) return
+  host.innerHTML = pagerMarkup(key, page, totalPages)
+}
+
 function renderGeneralCards() {
-  const container = document.getElementById('inv-general-list')
-  if (!container) return
+  const list = document.getElementById('inv-general-list')
+  if (!list) return
+  scrubOrphanStockNodes('[data-panel="general"] .inv-board.is-success', 'inv-general-list')
+  PAGE_SIZE.general = PAGE_SIZE_BASE.general
   if (!cache.general.length) {
-    container.innerHTML = emptyMsg(generalType
+    list.replaceChildren()
+    list.insertAdjacentHTML('afterbegin', emptyMsg(generalType
       ? `Sin químicos de tipo ${TYPE_LABELS[generalType] || generalType} en bodega`
-      : 'Sin químicos disponibles en bodega')
+      : 'Sin químicos disponibles en bodega'))
+    setPagerHost('inv-general-pager', 'general', 1, 1)
     return
   }
   const { items, page, totalPages } = slicePage('general')
-  container.innerHTML = `
-    ${generalType ? `<div class="inv-chem-grid">${items.map((c) => chemCard(c, 'disponible')).join('')}</div>` : groupedCards(items)}
-    ${pagerMarkup('general', page, totalPages)}`
+  const body = generalType
+    ? `<div class="inv-chem-grid">${items.map((c) => chemCard(c, 'disponible')).join('')}</div>`
+    : groupedCards(items)
+  list.replaceChildren()
+  list.insertAdjacentHTML('afterbegin', body)
+  setPagerHost('inv-general-pager', 'general', page, totalPages)
 }
 
 function groupedCards(items) {
@@ -532,19 +678,25 @@ function emptyMsg(text) {
 function paintMini(key, itemHtml, emptyText) {
   const el = document.getElementById(`inv-${key}-list`)
   if (!el) return
+  scrubOrphanStockNodes(`[data-panel="${key}"] .inv-board`, `inv-${key}-list`)
+  PAGE_SIZE[key] = resolvePageSize(key)
   if (!cache[key].length) {
-    el.innerHTML = emptyMsg(emptyText)
+    el.replaceChildren()
+    el.insertAdjacentHTML('afterbegin', emptyMsg(emptyText))
+    setPagerHost(`inv-${key}-pager`, key, 1, 1)
     return
   }
   const { items, page, totalPages } = slicePage(key)
-  el.innerHTML = `
-    <div class="inv-mini-grid">${items.map(itemHtml).join('')}</div>
-    ${pagerMarkup(key, page, totalPages)}`
+  el.replaceChildren()
+  el.insertAdjacentHTML('afterbegin', `<div class="inv-mini-grid">${items.map(itemHtml).join('')}</div>`)
+  setPagerHost(`inv-${key}-pager`, key, page, totalPages)
 }
 
 function paintTransit() {
   const el = document.getElementById('inv-transit-list')
   if (!el) return
+  scrubOrphanStockNodes('[data-panel="transit"] .inv-board', 'inv-transit-list')
+  PAGE_SIZE.transit = resolvePageSize('transit')
   if (!cache.transit.length) {
     el.innerHTML = emptyMsg('Sin items en espera o pedido. Importa SOC/OCC en Solicitudes.')
     return
@@ -560,22 +712,25 @@ function paintTransit() {
     ? `<p class="inv-subhead">Pedido</p>
        <div class="inv-mini-grid">${ordered.map(miniOrdered).join('')}</div>`
     : ''
-  el.innerHTML = `
-    <div class="inv-board-body">${waitBlock}${orderBlock}</div>
-    ${pagerMarkup('transit', page, totalPages)}`
+  el.replaceChildren()
+  el.insertAdjacentHTML('afterbegin', `<div class="inv-board-body">${waitBlock}${orderBlock}</div>`)
+  setPagerHost('inv-transit-pager', 'transit', page, totalPages)
 }
 
 function paintMovements() {
   const container = document.getElementById('movements-list')
   if (!container) return
+  PAGE_SIZE.movements = resolvePageSize('movements')
   if (!cache.movements.length) {
-    container.innerHTML = '<p class="inv-empty">Sin movimientos registrados</p>'
+    container.replaceChildren()
+    container.insertAdjacentHTML('afterbegin', '<p class="inv-empty">Sin movimientos registrados</p>')
+    setPagerHost('inv-movements-pager', 'movements', 1, 1)
     return
   }
   const { items, page, totalPages } = slicePage('movements')
-  container.innerHTML = `
-    <div class="inv-side-moves">${items.map(moveCard).join('')}</div>
-    ${pagerMarkup('movements', page, totalPages)}`
+  container.replaceChildren()
+  container.insertAdjacentHTML('afterbegin', `<div class="inv-side-moves">${items.map(moveCard).join('')}</div>`)
+  setPagerHost('inv-movements-pager', 'movements', page, totalPages)
 }
 
 function moveCard(m) {
@@ -741,12 +896,20 @@ function onStockClick(event) {
   const pagerBtn = event.target.closest('.inv-pager-btn')
   if (pagerBtn) {
     event.preventDefault()
+    event.stopPropagation()
     if (pagerBtn.disabled) return
     const nav = pagerBtn.closest('[data-pager]')
     if (!nav) return
     const key = nav.dataset.pager
     pages[key] = (pages[key] || 1) + Number(pagerBtn.dataset.dir)
     paintKey(key)
+    if (key === 'general') {
+      scrollStockListIntoView(document.getElementById('inv-general-list'))
+    } else if (key === 'movements') {
+      scrollStockListIntoView(document.getElementById('movements-list'))
+    } else {
+      scrollStockListIntoView(document.getElementById(`inv-${key}-list`))
+    }
     return
   }
   const el = event.target.closest('[data-goto-chemicals]')

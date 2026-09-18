@@ -141,6 +141,8 @@ Eso ejecuta `build:runtime`, genera el instalador NSIS y sube a GitHub Release:
 - `Tintoreria de Hilos Setup x.y.z.exe`
 - `latest.yml` (metadatos que usa electron-updater)
 
+En `build.publish` está **`"releaseType": "release"`**: la release queda **publicada** al terminar el build (no en borrador). Si ves **Draft**, revisa que no tengas `EP_DRAFT=true` en el entorno.
+
 **Alternativa manual:** `npm run dist` y sube a mano los archivos anteriores a una Release etiquetada `vX.Y.Z` (la etiqueta debe coincidir con la versión).
 
 ---
@@ -149,6 +151,8 @@ Eso ejecuta `build:runtime`, genera el instalador NSIS y sube a GitHub Release:
 
 1. Abrir la app → **Configuración** → pestaña **Aplicación**.
 2. **Buscar actualizaciones** → si hay versión nueva → **Descargar** → **Reiniciar e instalar**.
+
+Al reiniciar, el instalador NSIS corre en **modo silencioso** (`/S`): no debería mostrar el asistente “Siguiente / Cancelar”; la app se cierra, se actualiza sola y vuelve a abrir. La **primera** instalación manual sigue usando el `.exe` normal con asistente.
 
 Si no hay release en GitHub o el repo/token está mal configurado, verás un mensaje de error en pantalla y en `%LOCALAPPDATA%\Tintoreria\logs\electron-boot.log`.
 
@@ -161,6 +165,27 @@ Si no hay release en GitHub o el repo/token está mal configurado, verás un men
 - [ ] PC de prueba con build Fase 2 instalada
 - [ ] Subir `version`, publicar `1.0.1` (o similar) y actualizar desde **Aplicación** sin copiar el `.exe` a mano
 - [ ] `npm start` en dev sigue funcionando
+
+---
+
+## Error `spawn UNKNOWN` al compilar (Windows Security)
+
+Durante `npm run dist` / `npm run release`, electron-builder **ejecuta un momento** el `.exe` recién creado para generar el desinstalador. **Seguridad de Windows** (Smart App Control / Defender) puede bloquear Node.js y verás `spawn UNKNOWN` y un aviso sobre `Tintoreria de Hilos Setup x.x.x.exe`.
+
+**Qué hacer:**
+
+1. Si aparece el popup de **Seguridad de Windows** → **Más información** → **Ejecutar de todas formas** / permitir.
+2. Añade **exclusión** de carpeta: *Seguridad de Windows* → *Protección contra virus* → *Administrar configuración* → *Exclusiones* → carpeta  
+   `C:\Users\DESARROLLADOR\Documents\produccion2026\ui\dist`
+3. Vuelve a ejecutar (sin hace falta `build:runtime` otra vez si no cambió Python/API):
+
+```powershell
+cd ui
+$env:CSC_IDENTITY_AUTO_DISCOVERY='false'
+npx electron-builder --win --publish always
+```
+
+(Solo publicar: si ya existe el `.exe` y `latest.yml` en `dist\`, sube la release a mano en GitHub.)
 
 ---
 

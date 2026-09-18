@@ -24,6 +24,11 @@ ui/build/
 worker/node_modules/
 worker/.wrangler/
 
+# Code signing (never commit private keys)
+*.pfx
+*.p12
+ui/release.secrets.env
+
 # Environment
 .env
 .env.local

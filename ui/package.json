@@ -1,6 +1,6 @@
 {
   "name": "tintoreria-local",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Sistema local de gestion de tintoreria de hilos",
   "main": "electron.js",
   "author": "Tintoreria",
@@ -10,7 +10,9 @@
     "build:runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-api-runtime.ps1",
     "dist": "npm run build:runtime && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win",
     "dist:dir": "npm run build:runtime && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --dir",
-    "release": "npm run dist && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish always"
+    "release": "npm run build:runtime && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win --publish always",
+    "release:signed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-signed.ps1",
+    "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-release.ps1"
   },
   "repository": {
     "type": "git",
@@ -42,7 +44,11 @@
     "publish": {
       "provider": "github",
       "owner": "JuanRR777",
-      "repo": "Tintoreria-app"
+      "repo": "Tintoreria-app",
+      "releaseType": "release",
+      "publisherName": [
+        "Tintoreria Interno"
+      ]
     },
     "extraResources": [
       {
@@ -64,6 +70,7 @@
       "target": [
         "nsis"
       ],
+      "publisherName": "Tintoreria Interno",
       "signAndEditExecutable": false,
       "signDlls": false
     },
