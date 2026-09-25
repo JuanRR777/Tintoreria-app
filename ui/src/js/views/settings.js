@@ -133,7 +133,7 @@ async function renderAppUpdates(c) {
           <div class="settings-update-actions">
             <button class="btn btn-primary btn-sm" id="btn-check-updates">Buscar actualizaciones</button>
             <button class="btn btn-secondary btn-sm" id="btn-download-update" style="display:none">Descargar</button>
-            <button class="btn btn-primary btn-sm" id="btn-install-update" style="display:none">Reiniciar e instalar</button>
+            <button class="btn btn-primary btn-sm" id="btn-install-update" style="display:none">Instalar y reiniciar</button>
           </div>
         </div>
       </div>
@@ -180,7 +180,7 @@ async function renderAppUpdates(c) {
         btnDownload.disabled = true
         break
       case 'downloaded':
-        statusEl.textContent = `Version ${payload.version || pendingVersion} lista. Reinicia para completar la instalacion.`
+        statusEl.textContent = `Version ${payload.version || pendingVersion} lista. Pulsa Instalar: se cierra Tintoreria, veras el progreso de copia y al terminar se reabre sola.`
         btnDownload.style.display = 'none'
         btnInstall.style.display = 'inline-flex'
         btnCheck.disabled = false

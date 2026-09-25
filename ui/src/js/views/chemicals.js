@@ -15,6 +15,20 @@ const PROCUREMENT = {
   disponible:  ['badge-green', 'Disponible'],
 }
 
+const LOT_STATUS = {
+  active: 'Activo',
+  depleted: 'Agotado',
+  expired: 'Vencido',
+}
+
+const MOVE_TYPE = {
+  in: 'Entrada',
+  out: 'Salida',
+  adjustment: 'Ajuste',
+  waste: 'Merma',
+  return: 'Devolución',
+}
+
 const ICO = {
   flask: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6"/><path d="M10 9h4"/><path d="M9 3v7l-5.5 9.5A1.65 1.65 0 0 0 5.9 22h12.2a1.65 1.65 0 0 0 1.4-2.5L15 10V3"/></svg>`,
   lots: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7L12 12l8.7-5"/><path d="M12 22V12"/></svg>`,
@@ -22,7 +36,10 @@ const ICO = {
   trash: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>`,
 }
 
+const CHEM_PAGE_SIZE = 10
+
 let reloadList = async () => {}
+let chemPage = 1
 
 export async function showView(container, params = {}) {
   setPageHeader({
@@ -40,7 +57,7 @@ export async function showView(container, params = {}) {
     <div class="toolbar">
       <div class="search-box">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="search-chemicals" placeholder="Buscar por nombre, codigo o proveedor...">
+        <input type="text" id="search-chemicals" placeholder="Buscar por nombre, codigo, lote o proveedor...">
       </div>
       <select class="form-select" id="filter-type" style="width:180px">
         <option value="">Todos los tipos</option>
@@ -71,7 +88,7 @@ export async function showView(container, params = {}) {
   let debounce
   const onFilter = () => {
     clearTimeout(debounce)
-    debounce = setTimeout(reload, 300)
+    debounce = setTimeout(() => reload({ resetPage: true }), 300)
   }
   search.oninput   = onFilter
   typeFilter.onchange = onFilter
@@ -92,10 +109,11 @@ export async function showView(container, params = {}) {
       procFilter.value = key
       lowStockF.checked = false
     }
-    reload()
+    reload({ resetPage: true })
   }
 
-  async function reload() {
+  async function reload(opts = {}) {
+    if (opts.resetPage) chemPage = 1
     const query = {
       search:        search.value || undefined,
       chemical_type: typeFilter.value || undefined,
@@ -157,6 +175,63 @@ function sumChip(key, label, count, active) {
     </button>`
 }
 
+function paginateChemicals(items) {
+  const ordered = groupChemicalsByType(items).flatMap((group) => group.items)
+  const total = ordered.length
+  const totalPages = Math.max(1, Math.ceil(total / CHEM_PAGE_SIZE) || 1)
+  if (chemPage > totalPages) chemPage = totalPages
+  if (chemPage < 1) chemPage = 1
+  const start = (chemPage - 1) * CHEM_PAGE_SIZE
+  const pageItems = ordered.slice(start, start + CHEM_PAGE_SIZE)
+  return {
+    groups: groupChemicalsByType(pageItems),
+    total,
+    totalPages,
+    page: chemPage,
+    from: total ? start + 1 : 0,
+    to: start + pageItems.length,
+  }
+}
+
+function chemPageList(page, totalPages) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1)
+  const set = new Set([1, totalPages, page, page - 1, page + 1])
+  if (page <= 3) [2, 3, 4].forEach((n) => set.add(n))
+  if (page >= totalPages - 2) [totalPages - 3, totalPages - 2, totalPages - 1].forEach((n) => set.add(n))
+  return [...set].filter((n) => n >= 1 && n <= totalPages).sort((a, b) => a - b)
+}
+
+function chemPagerMarkup(page, totalPages) {
+  if (totalPages <= 1) return ''
+  const nums = chemPageList(page, totalPages)
+  let html = `
+    <nav class="chem-pager" aria-label="Paginación">
+      <button type="button" class="chem-pager-btn" data-chem-page="${page - 1}" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>`
+  nums.forEach((n, i) => {
+    if (i > 0 && n - nums[i - 1] > 1) html += '<span class="chem-pager-ellipsis">…</span>'
+    html += n === page
+      ? `<button type="button" class="chem-pager-btn is-current" disabled aria-current="page">${n}</button>`
+      : `<button type="button" class="chem-pager-btn" data-chem-page="${n}">${n}</button>`
+  })
+  html += `
+      <button type="button" class="chem-pager-btn" data-chem-page="${page + 1}" ${page >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>
+    </nav>`
+  return html
+}
+
+function chemTableBar(paged, position) {
+  const pager = chemPagerMarkup(paged.page, paged.totalPages)
+  const meta = paged.totalPages > 1
+    ? `${paged.from}–${paged.to} de ${paged.total}`
+    : `${paged.total} químico${paged.total === 1 ? '' : 's'}`
+  if (position === 'bottom' && !pager) return ''
+  return `
+    <div class="chem-table-bar${position === 'bottom' ? ' is-bottom' : ''}">
+      <div class="chem-table-meta">${meta}</div>
+      ${pager}
+    </div>`
+}
+
 function renderChemicalTable(items, container, reload) {
   if (!items.length) {
     container.innerHTML = `
@@ -168,13 +243,25 @@ function renderChemicalTable(items, container, reload) {
     return
   }
 
+  const paged = paginateChemicals(items)
+  const body = paged.groups.map((group) => `
+    <tr class="chem-group-row">
+      <td colspan="9">
+        <span class="chem-group-label">${esc(group.label)}</span>
+        <span class="chem-group-count">${group.items.length}</span>
+      </td>
+    </tr>
+    ${group.items.map((c) => chemicalRow(c)).join('')}
+  `).join('')
+
   container.innerHTML = `
-    <div class="chem-table-meta">${items.length} químico${items.length === 1 ? '' : 's'}</div>
+    ${chemTableBar(paged, 'top')}
     <div class="table-wrapper chem-wrap">
       <table class="data-table chem-table">
         <thead>
           <tr>
             <th>Producto</th>
+            <th>Lote</th>
             <th>Tipo</th>
             <th>Stock actual</th>
             <th>Pedido</th>
@@ -185,10 +272,11 @@ function renderChemicalTable(items, container, reload) {
           </tr>
         </thead>
         <tbody>
-          ${items.map(c => chemicalRow(c)).join('')}
+          ${body}
         </tbody>
       </table>
     </div>
+    ${chemTableBar(paged, 'bottom')}
   `
 
   const runReload = reload || reloadList
@@ -201,6 +289,33 @@ function renderChemicalTable(items, container, reload) {
   container.querySelectorAll('[data-delete]').forEach(btn =>
     btn.onclick = () => deleteChemical(parseInt(btn.dataset.delete))
   )
+  container.querySelectorAll('[data-chem-page]').forEach((btn) => {
+    btn.onclick = () => {
+      if (btn.disabled) return
+      const next = Number(btn.dataset.chemPage)
+      if (!Number.isFinite(next) || next < 1) return
+      chemPage = next
+      renderChemicalTable(items, container, runReload)
+      container.querySelector('.chem-table-bar')?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  })
+}
+
+function groupChemicalsByType(items) {
+  const groups = new Map()
+  for (const c of items) {
+    const key = c.chemical_type || 'otros'
+    const label = TYPE_LABELS[key] || c.chemical_type || 'Otros'
+    if (!groups.has(key)) groups.set(key, { key, label, items: [] })
+    groups.get(key).items.push(c)
+  }
+
+  const list = [...groups.values()]
+  list.sort((a, b) => a.label.localeCompare(b.label, 'es', { sensitivity: 'base' }))
+  for (const group of list) {
+    group.items.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'es', { sensitivity: 'base' }))
+  }
+  return list
 }
 
 function chemicalRow(c) {
@@ -217,6 +332,10 @@ function chemicalRow(c) {
   const fill = min > 0 ? Math.min(100, Math.round((stockQty / min) * 100)) : (stockQty > 0 ? 100 : 0)
   const location = String(c.location || '').trim()
 
+  const lotNumber = String(c.current_lot_number || '').trim()
+  const extraLots = Math.max(0, Number(c.active_lot_count || 0) - (lotNumber ? 1 : 0))
+  const supplier = c.current_lot_supplier || c.supplier
+
   return `
     <tr class="is-${esc(kind)} ${isLow ? 'is-low' : ''}">
       <td>
@@ -232,6 +351,12 @@ function chemicalRow(c) {
           </div>
         </div>
       </td>
+      <td>${lotNumber
+        ? `<button type="button" class="chem-lot" data-lots="${c.id}" title="Ver historial de lotes">
+             <code>${esc(lotNumber)}</code>
+             ${extraLots ? `<span class="chem-lot-more">+${extraLots}</span>` : ''}
+           </button>`
+        : '<span class="chem-lot is-empty">—</span>'}</td>
       <td><span class="chem-type">${esc(typeLabel)}</span></td>
       <td>
         <div class="chem-stock ${isLow ? 'is-low' : ''}">
@@ -242,14 +367,14 @@ function chemicalRow(c) {
       </td>
       <td class="chem-num ${pending ? 'has-pending' : ''}">${pending ? `${fmtQty(pending)} ${esc(c.unit || 'kg')}` : '—'}</td>
       <td class="chem-num">${fmtPrice(c.last_unit_price, c.last_unit_currency) || '—'}</td>
-      <td class="chem-supplier">${esc(c.supplier || '—')}</td>
+      <td class="chem-supplier">${esc(supplier || '—')}</td>
       <td>${isPartial
         ? `<span class="badge badge-green">Disponible</span> <span class="badge badge-amber">Parcial</span>`
         : `<span class="badge ${procCls}">${esc(procLabel)}</span>`}</td>
       <td>
         <div class="actions-cell">
-          <button class="chem-icon-btn" data-lots="${c.id}" title="Ver lotes y stock">${ICO.lots}</button>
-          <button class="chem-icon-btn" data-edit="${c.id}" title="Editar">${ICO.edit}</button>
+          <button class="chem-icon-btn is-lots" data-lots="${c.id}" title="Historial de lotes">${ICO.lots}</button>
+          <button class="chem-icon-btn is-edit" data-edit="${c.id}" title="Editar">${ICO.edit}</button>
           <button class="chem-icon-btn is-danger" data-delete="${c.id}" title="Eliminar">${ICO.trash}</button>
         </div>
       </td>
@@ -439,59 +564,143 @@ function openChemicalForm(chemicalId, onSuccess) {
 // Modal de lotes
 // ---------------------------------------------------------------------------
 
+function toDateInput(value) {
+  if (!value) return ''
+  const text = String(value).trim()
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10)
+  return ''
+}
+
+function fmtDay(value) {
+  const iso = toDateInput(value)
+  if (!iso) return '—'
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+
+function fmtWhen(value) {
+  if (!value) return '—'
+  const text = String(value).replace('T', ' ').trim()
+  const day = fmtDay(text)
+  const time = text.slice(11, 16)
+  return time ? `${day} ${time}` : day
+}
+
+function fmtMoveNote(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.replace(/\bOCC\s+(OCC-)/i, '$1')
+}
+
+function fillLotForm(lot, chem) {
+  const unit = lot?.unit || chem.unit || 'kg'
+  document.getElementById('lot-number').value = lot?.lot_number || ''
+  document.getElementById('lot-qty').value = lot ? Number(lot.quantity_received || 0) : ''
+  document.getElementById('lot-qty').placeholder = unit
+  document.getElementById('lot-purchase').value = toDateInput(lot?.purchase_date)
+  document.getElementById('lot-expiry').value = toDateInput(lot?.expiry_date)
+  const cost = Number(lot?.unit_cost || chem.last_unit_price || 0)
+  document.getElementById('lot-cost').value = Number.isFinite(cost) ? cost : 0
+  document.getElementById('lot-supplier').value = lot?.supplier || chem.supplier || ''
+}
+
 async function openLotsModal(chemicalId) {
   const chem = await api.get(chemicalId)
-  const lots = await api.lots(chemicalId)
+  const [lots, moves] = await Promise.all([
+    api.lots(chemicalId),
+    api.movements(chemicalId).catch(() => []),
+  ])
+  const preferred = lots.find((l) => !l.expiry_date && l.status === 'active') || lots.find((l) => l.status === 'active') || lots[0] || null
 
   const lotsHTML = lots.length
-    ? `<div class="table-wrapper" style="margin-bottom:16px">
+    ? `<div class="table-wrapper">
         <table class="data-table">
-          <thead><tr><th>Lote</th><th>Recibido</th><th>Restante</th><th>Vencimiento</th><th>Estado</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Lote</th>
+              <th>Proveedor</th>
+              <th>Ingreso</th>
+              <th>Recibido</th>
+              <th>Restante</th>
+              <th>Vencimiento</th>
+              <th>Estado</th>
+            </tr>
+          </thead>
           <tbody>
             ${lots.map(l => `
-              <tr>
-                <td>${l.lot_number}</td>
-                <td>${l.quantity_received} ${l.unit}</td>
-                <td style="font-weight:600">${Number(l.quantity_remaining).toFixed(2)} ${l.unit}</td>
-                <td>${l.expiry_date ? l.expiry_date.split('T')[0] : '-'}</td>
-                <td><span class="badge ${l.status === 'active' ? 'badge-green' : 'badge-gray'}">${l.status}</span></td>
+              <tr class="lot-pick-row${preferred && preferred.id === l.id ? ' is-selected' : ''}" data-lot-id="${l.id}">
+                <td><code class="chem-lot-code">${esc(l.lot_number)}</code></td>
+                <td>${esc(l.supplier || chem.supplier || '—')}</td>
+                <td>${fmtDay(l.purchase_date || l.created_at)}</td>
+                <td>${l.quantity_received} ${esc(l.unit)}</td>
+                <td style="font-weight:600">${Number(l.quantity_remaining).toFixed(2)} ${esc(l.unit)}</td>
+                <td>${fmtDay(l.expiry_date)}</td>
+                <td><span class="badge ${l.status === 'active' ? 'badge-green' : 'badge-gray'}">${esc(LOT_STATUS[l.status] || l.status)}</span></td>
               </tr>`).join('')}
           </tbody>
         </table>
        </div>`
-    : '<div class="empty-state" style="padding:20px"><p>Sin lotes registrados</p></div>'
+    : '<div class="empty-state" style="padding:20px"><p>Sin lotes. El lote se crea al ingresar el producto por OCC.</p></div>'
+
+  const movesHTML = moves.length
+    ? `<div class="table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Movimiento</th>
+              <th>Lote</th>
+              <th>Cantidad</th>
+              <th>Detalle</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${moves.map((m) => {
+              const kind = m.movement_type || ''
+              const sign = kind === 'out' || kind === 'waste' ? '−' : kind === 'in' || kind === 'return' ? '+' : ''
+              return `
+                <tr>
+                  <td>${fmtWhen(m.created_at)}</td>
+                  <td><span class="chem-move-kind is-${esc(kind)}">${esc(MOVE_TYPE[kind] || kind || '—')}</span></td>
+                  <td>${m.lot_number ? `<code class="chem-lot-code">${esc(m.lot_number)}</code>` : '—'}</td>
+                  <td class="chem-num">${sign}${fmtQty(m.quantity, 2)} ${esc(m.unit || chem.unit || '')}</td>
+                  <td class="chem-move-note">${esc(fmtMoveNote(m.notes) || m.user_name || '—')}</td>
+                </tr>`
+            }).join('')}
+          </tbody>
+        </table>
+       </div>`
+    : '<p class="chem-history-empty">Sin movimientos registrados.</p>'
 
   const addForm = `
-    <div class="separator"></div>
-    <h4 style="margin:0 0 12px;font-size:13px;font-weight:600">Agregar lote de entrada</h4>
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Numero de lote <span class="required"></span></label>
-        <input id="lot-number" class="form-input" placeholder="Ej: LOT-2026-001">
+        <label class="form-label">Numero de lote</label>
+        <input id="lot-number" class="form-input" readonly>
       </div>
       <div class="form-group">
-        <label class="form-label">Cantidad recibida <span class="required"></span></label>
-        <input id="lot-qty" class="form-input" type="number" min="0.001" step="0.001" placeholder="0.000">
+        <label class="form-label">Cantidad recibida</label>
+        <input id="lot-qty" class="form-input" type="number" readonly>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Fecha de compra</label>
-        <input id="lot-purchase" class="form-input" type="date">
+        <input id="lot-purchase" class="form-input" type="date" readonly>
       </div>
       <div class="form-group">
-        <label class="form-label">Fecha de vencimiento</label>
-        <input id="lot-expiry" class="form-input" type="date">
+        <label class="form-label">Fecha de vencimiento <span class="required"></span></label>
+        <input id="lot-expiry" class="form-input" type="date" ${lots.length ? '' : 'disabled'}>
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">Costo unitario</label>
-        <input id="lot-cost" class="form-input" type="number" min="0" step="0.01" value="0">
+        <input id="lot-cost" class="form-input" type="number" readonly>
       </div>
       <div class="form-group">
         <label class="form-label">Proveedor</label>
-        <input id="lot-supplier" class="form-input" placeholder="Proveedor del lote">
+        <input id="lot-supplier" class="form-input" readonly>
       </div>
     </div>
     <div id="lot-error" class="form-error" style="display:none"></div>
@@ -499,36 +708,72 @@ async function openLotsModal(chemicalId) {
 
   const footer = `
     <button class="btn btn-secondary" onclick="document.getElementById('modal-overlay').style.display='none'">Cerrar</button>
-    <button class="btn btn-primary" id="lot-submit">Agregar lote</button>
+    <button class="btn btn-primary" id="lot-submit" ${lots.length ? '' : 'disabled'}>Guardar</button>
   `
 
-  openModal(`Lotes: ${chem.name}`, lotsHTML + addForm, { size: 'lg', footerHTML: footer })
+  const bodyEl = openModal(`Lotes: ${chem.name}`, `
+    <div class="lot-tabs" role="tablist">
+      <button type="button" class="lot-tab is-active" data-lot-tab="detalle" role="tab">Detalle</button>
+      <button type="button" class="lot-tab" data-lot-tab="movimientos" role="tab">
+        Movimientos <span class="lot-tab-count">${moves.length}</span>
+      </button>
+      <button type="button" class="lot-tab" data-lot-tab="historial" role="tab">
+        Historial <span class="lot-tab-count">${lots.length}</span>
+      </button>
+    </div>
+    <div class="lot-pane" data-lot-pane="detalle">${addForm}</div>
+    <div class="lot-pane" data-lot-pane="movimientos" hidden>${movesHTML}</div>
+    <div class="lot-pane" data-lot-pane="historial" hidden>${lotsHTML}</div>
+  `, { size: 'lg', footerHTML: footer })
+  let selectedId = preferred ? preferred.id : null
+  fillLotForm(preferred, chem)
+
+  const showLotTab = (name) => {
+    bodyEl.querySelectorAll('[data-lot-tab]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.lotTab === name)
+    })
+    bodyEl.querySelectorAll('[data-lot-pane]').forEach((pane) => {
+      pane.hidden = pane.dataset.lotPane !== name
+    })
+    const submit = document.getElementById('lot-submit')
+    if (submit) submit.hidden = name !== 'detalle'
+  }
+
+  bodyEl.querySelectorAll('[data-lot-tab]').forEach((btn) => {
+    btn.onclick = () => showLotTab(btn.dataset.lotTab)
+  })
+
+  bodyEl.querySelectorAll('.lot-pick-row').forEach((row) => {
+    row.onclick = () => {
+      selectedId = Number(row.dataset.lotId)
+      bodyEl.querySelectorAll('.lot-pick-row').forEach((el) => el.classList.toggle('is-selected', Number(el.dataset.lotId) === selectedId))
+      const lot = lots.find((l) => l.id === selectedId)
+      fillLotForm(lot, chem)
+      showLotTab('detalle')
+    }
+  })
 
   document.getElementById('lot-submit').onclick = async () => {
-    const errEl  = document.getElementById('lot-error')
-    const lotNum = document.getElementById('lot-number').value.trim()
-    const qty    = parseFloat(document.getElementById('lot-qty').value)
-
-    if (!lotNum || !qty || qty <= 0) {
-      errEl.textContent   = 'Numero de lote y cantidad son obligatorios'
+    const errEl = document.getElementById('lot-error')
+    const expiry = document.getElementById('lot-expiry').value
+    if (!selectedId) {
+      errEl.textContent = 'No hay lote de OCC para este producto'
+      errEl.style.display = 'block'
+      return
+    }
+    if (!expiry) {
+      errEl.textContent = 'Indica la fecha de vencimiento'
       errEl.style.display = 'block'
       return
     }
 
     try {
-      await api.addLot(chemicalId, {
-        lot_number:      lotNum,
-        quantity_received: qty,
-        unit:            chem.unit,
-        purchase_date:   document.getElementById('lot-purchase').value || undefined,
-        expiry_date:     document.getElementById('lot-expiry').value   || undefined,
-        unit_cost:       parseFloat(document.getElementById('lot-cost').value) || 0,
-        supplier:        document.getElementById('lot-supplier').value.trim() || undefined,
-      })
-      toast.success(`Lote ${lotNum} agregado. Stock actualizado.`)
-      closeModal()
+      await api.updateLot(chemicalId, selectedId, { expiry_date: expiry })
+      toast.success('Lote actualizado')
+      reloadList()
+      await openLotsModal(chemicalId)
     } catch (err) {
-      errEl.textContent   = err.message
+      errEl.textContent = err.message
       errEl.style.display = 'block'
     }
   }

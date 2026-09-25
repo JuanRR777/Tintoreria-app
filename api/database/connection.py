@@ -168,6 +168,7 @@ def init_db() -> None:
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             _seed(conn)
+        ensure_machines_schema(conn)
 
 
 def _seed(conn: D1Connection) -> None:
@@ -197,11 +198,56 @@ def _seed(conn: D1Connection) -> None:
         (1, "batch", 1, "LOTE", 6),
         (2, "recipe", 1, "REC", 4),
         (3, "chemical", 1, "QMC", 4),
+        (4, "machine", 1, "MAQ", 4),
     ]
     conn.executemany(
         "INSERT OR IGNORE INTO code_sequences (id, sequence_type, current_value, prefix, digits) VALUES (?,?,?,?,?)",
         sequences,
     )
+
+
+def _table_columns(conn: D1Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    names: set[str] = set()
+    for row in rows or []:
+        name = row.get("name") if isinstance(row, Mapping) else None
+        if name is None and isinstance(row, Mapping):
+            vals = list(row.values())
+            name = vals[1] if len(vals) > 1 else vals[0] if vals else None
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _try_sql(conn: D1Connection, sql: str) -> None:
+    try:
+        conn.execute(sql)
+    except Exception:
+        pass
+
+
+def _apply_machines_schema(conn: D1Connection) -> None:
+    names = _table_columns(conn, "machines")
+    if "dye_format" not in names:
+        _try_sql(conn, "ALTER TABLE machines ADD COLUMN dye_format TEXT NOT NULL DEFAULT 'ambos'")
+    if "manufacture_year" not in names:
+        _try_sql(conn, "ALTER TABLE machines ADD COLUMN manufacture_year INTEGER")
+    if "equipment_type" not in names:
+        _try_sql(conn, "ALTER TABLE machines ADD COLUMN equipment_type TEXT")
+    _try_sql(
+        conn,
+        """INSERT OR IGNORE INTO code_sequences (sequence_type, current_value, prefix, digits)
+           VALUES ('machine', 1, 'MAQ', 4)""",
+    )
+
+
+def ensure_machines_schema(conn: Optional[D1Connection] = None) -> None:
+    """Agrega columnas nuevas de máquina si el D1 aún no tiene la migración 0006."""
+    if conn is None:
+        with get_db() as owned:
+            _apply_machines_schema(owned)
+        return
+    _apply_machines_schema(conn)
 
 
 def generate_code(sequence_type: str) -> str:

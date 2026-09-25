@@ -3,19 +3,22 @@ import { toast }   from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
 import { navigate } from '../router.js'
 import { setPageHeader } from '../layout.js'
+import {
+  esc, fiberLabel, processMetaLine, processStage, renderStepper, weighCounts,
+} from '../components/process-ui.js'
 
 const STATUS_MAP = {
-  pending:     ['badge-gray',  'Pendiente'],
+  pending:     ['badge-gray',  'Programado'],
   in_progress: ['badge-blue',  'En proceso'],
   paused:      ['badge-amber', 'Pausado'],
-  completed:   ['badge-green', 'Completado'],
+  completed:   ['badge-green', 'Terminado'],
   cancelled:   ['badge-red',   'Cancelado'],
 }
 
 export async function showView(container, params = {}) {
   setPageHeader({
     title: 'Procesos',
-    subtitle: 'Lotes de produccion: historial y ejecucion',
+    subtitle: 'Programa el lote desde la receta y comienza el pesaje',
     actionsHtml: `
       <button class="btn btn-primary" id="btn-new-process">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -60,13 +63,13 @@ async function loadProcesses(params = {}) {
   list.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div>'
   try {
     const data = await api.list(params)
-    renderTable(data, list)
+    renderProcessCards(data, list)
   } catch (err) {
     list.innerHTML = `<div class="empty-state"><p>${err.message}</p></div>`
   }
 }
 
-function renderTable(items, container) {
+function renderProcessCards(items, container) {
   if (!items.length) {
     container.innerHTML = `
       <div class="empty-state">
@@ -76,59 +79,43 @@ function renderTable(items, container) {
     return
   }
 
-  container.innerHTML = `
-    <div class="table-wrapper">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Lote</th><th>Receta</th><th>Maquina</th>
-            <th>Fibra (kg)</th><th>Operador</th><th>Estado</th>
-            <th>Inicio</th><th></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${items.map(p => processRow(p)).join('')}
-        </tbody>
-      </table>
-    </div>
-  `
+  container.innerHTML = `<div class="proc-grid">${items.map(processCard).join('')}</div>`
 
-  container.querySelectorAll('[data-weighing]').forEach(btn =>
-    btn.onclick = () => navigate('weighing', { processId: parseInt(btn.dataset.weighing) })
-  )
-  container.querySelectorAll('[data-complete]').forEach(btn =>
-    btn.onclick = () => completeProcess(parseInt(btn.dataset.complete))
-  )
-  container.querySelectorAll('[data-cancel]').forEach(btn =>
-    btn.onclick = () => cancelProcess(parseInt(btn.dataset.cancel))
-  )
+  container.querySelectorAll('[data-weighing]').forEach((btn) => {
+    btn.onclick = () => navigate('weighing', { processId: parseInt(btn.dataset.weighing, 10) })
+  })
+  container.querySelectorAll('[data-complete]').forEach((btn) => {
+    btn.onclick = () => completeProcess(parseInt(btn.dataset.complete, 10))
+  })
+  container.querySelectorAll('[data-cancel]').forEach((btn) => {
+    btn.onclick = () => cancelProcess(parseInt(btn.dataset.cancel, 10))
+  })
 }
 
-function processRow(p) {
+function processCard(p) {
   const [cls, label] = STATUS_MAP[p.status] || ['badge-gray', p.status]
-  const startDate = p.started_at ? p.started_at.split('T')[0] : (p.created_at?.split('T')[0] || '-')
-  const canWeigh    = ['pending','in_progress'].includes(p.status)
-  const canComplete = p.status === 'in_progress'
-  const canCancel   = ['pending','in_progress','paused'].includes(p.status)
+  const stage = processStage(p)
+  const { total, done } = weighCounts(p)
+  const canWeigh = ['pending', 'in_progress', 'paused'].includes(p.status)
+  const canComplete = p.status === 'in_progress' && total > 0 && done >= total
+  const canCancel = ['pending', 'in_progress', 'paused'].includes(p.status)
 
   return `
-    <tr>
-      <td><code style="font-weight:700">${p.batch_number}</code></td>
-      <td>${p.recipe_name} <span style="color:var(--text-muted);font-size:11px">(${p.recipe_code})</span></td>
-      <td style="color:var(--text-muted)">${p.machine_name || '-'}</td>
-      <td style="font-variant-numeric:tabular-nums">${Number(p.fiber_weight_kg).toFixed(2)} kg</td>
-      <td style="color:var(--text-muted)">${p.operator_name}</td>
-      <td><span class="badge ${cls}">${label}</span></td>
-      <td style="color:var(--text-muted);font-size:12px">${startDate}</td>
-      <td>
-        <div class="actions-cell">
-          ${canWeigh    ? `<button class="btn btn-primary btn-sm"  data-weighing="${p.id}">Pesar</button>` : ''}
-          ${canComplete ? `<button class="btn btn-success btn-sm"  data-complete="${p.id}">Completar</button>` : ''}
-          ${canCancel   ? `<button class="btn btn-ghost btn-sm text-danger" data-cancel="${p.id}">Cancelar</button>` : ''}
+    <article class="proc-card">
+      <header class="proc-card-top">
+        <div>
+          <p class="proc-card-code">${esc(p.batch_number)}</p>
+          <p class="proc-card-meta">${esc(processMetaLine(p))}</p>
         </div>
-      </td>
-    </tr>
-  `
+        <span class="badge ${cls}">${label}</span>
+      </header>
+      ${renderStepper(stage)}
+      <footer class="proc-card-actions">
+        ${canWeigh ? `<button type="button" class="btn btn-primary btn-sm" data-weighing="${p.id}">${done ? 'Continuar pesaje' : 'Comenzar pesaje'}</button>` : ''}
+        ${canComplete ? `<button type="button" class="btn btn-success btn-sm" data-complete="${p.id}">Completar</button>` : ''}
+        ${canCancel ? `<button type="button" class="btn btn-ghost btn-sm text-danger" data-cancel="${p.id}">Cancelar</button>` : ''}
+      </footer>
+    </article>`
 }
 
 // ---------------------------------------------------------------------------
@@ -141,45 +128,35 @@ async function openNewProcessForm(onSuccess) {
     machines.list(),
   ])
 
+  const actives = machineList.filter((m) => m.status === 'active')
   const formHTML = `
     <form id="process-form">
       <div class="form-group">
         <label class="form-label">Receta <span class="required"></span></label>
         <select id="pf-recipe" class="form-select" required>
           <option value="">Seleccionar receta</option>
-          ${recipeList.map(r => `<option value="${r.id}">[${r.code}] ${r.name} - ${r.fiber_type || 'fibra no especificada'}</option>`).join('')}
+          ${recipeList.map((r) => `<option value="${r.id}">[${esc(r.code)}] ${esc(r.name)}</option>`).join('')}
         </select>
+        <div id="pf-recipe-inherit" class="pf-inherit" hidden>
+          Datos de la receta, no editables aquí
+        </div>
       </div>
       <div class="form-group">
-        <label class="form-label">Peso de fibra a tenir (kg) <span class="required"></span></label>
-        <input id="pf-weight" class="form-input" type="number" min="0.001" step="0.001" placeholder="Ej: 25.500" required>
+        <label class="form-label">Peso de fibra a teñir (kg) <span class="required"></span></label>
+        <input id="pf-weight" class="form-input" type="number" min="0.001" step="0.001" placeholder="Ej: 200" required>
         <div class="form-hint" id="pf-water-hint"></div>
       </div>
       <div class="form-group">
-        <label class="form-label">Maquina</label>
+        <label class="form-label">Fecha y hora programada <span class="required"></span></label>
+        <input id="pf-when" class="form-input" type="datetime-local" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Máquina</label>
         <select id="pf-machine" class="form-select">
           <option value="">Sin asignar</option>
-          ${machineList.filter(m => m.status === 'active').map(m => `<option value="${m.id}">${m.name} (${m.machine_type}) - cap. ${m.capacity_kg} kg</option>`).join('')}
+          ${actives.map((m) => `<option value="${m.id}">${esc(m.name)} (${esc(m.equipment_type || m.machine_type || '—')}) · cap. ${esc(m.capacity_kg || 0)} kg</option>`).join('')}
         </select>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Tipo de fibra</label>
-          <select id="pf-fiber" class="form-select">
-            <option value="">De la receta</option>
-            <option value="lana">Lana</option>
-            <option value="algodon">Algodon</option>
-            <option value="acrilico">Acrilico</option>
-            <option value="poliester">Poliester</option>
-            <option value="nylon">Nylon</option>
-            <option value="seda">Seda</option>
-            <option value="mezcla">Mezcla</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Referencia de color</label>
-          <input id="pf-color" class="form-input" placeholder="Ej: ROJO-115">
-        </div>
+        <div class="form-hint" id="pf-machine-hint"></div>
       </div>
       <div class="form-group">
         <label class="form-label">Notas</label>
@@ -194,40 +171,86 @@ async function openNewProcessForm(onSuccess) {
     <button class="btn btn-primary" id="pf-submit">Crear proceso</button>
   `
 
-  openModal('Nuevo proceso de produccion', formHTML, { footerHTML: footer })
+  openModal('Nuevo proceso de producción', formHTML, { footerHTML: footer })
 
-  // Calcular agua cuando cambia la receta o el peso
-  document.getElementById('pf-recipe').onchange = updateWaterHint
-  document.getElementById('pf-weight').oninput  = updateWaterHint
+  document.getElementById('pf-recipe').onchange = refreshProcessHints
+  document.getElementById('pf-weight').oninput = refreshProcessHints
+  document.getElementById('pf-machine').onchange = refreshProcessHints
 
-  function updateWaterHint() {
-    const recipeId = parseInt(document.getElementById('pf-recipe').value)
-    const weight   = parseFloat(document.getElementById('pf-weight').value)
-    const hint     = document.getElementById('pf-water-hint')
-    if (!recipeId || !weight) { hint.textContent = ''; return }
+  function refreshProcessHints() {
+    const recipe = recipeList.find((r) => r.id === Number(document.getElementById('pf-recipe').value))
+    const inherit = document.getElementById('pf-recipe-inherit')
+    const waterHint = document.getElementById('pf-water-hint')
+    const machineHint = document.getElementById('pf-machine-hint')
+    const weight = Number(document.getElementById('pf-weight').value)
+    const machine = actives.find((m) => m.id === Number(document.getElementById('pf-machine').value))
 
-    const recipe = recipeList.find(r => r.id === recipeId)
-    if (recipe?.bath_ratio_l_per_kg) {
-      const liters = (recipe.bath_ratio_l_per_kg * weight).toFixed(1)
-      hint.textContent = `Volumen de bano estimado: ${liters} L (relacion ${recipe.bath_ratio_l_per_kg}:1)`
+    if (!recipe) {
+      inherit.hidden = true
+      waterHint.textContent = ''
+      machineHint.textContent = ''
+      machineHint.className = 'form-hint'
+      return
+    }
+
+    const color = recipe.color_name || recipe.color_reference || 'Sin definir'
+    const ratio = recipe.bath_ratio_l_per_kg
+    const ings = recipe.ingredients || []
+    inherit.hidden = false
+    inherit.innerHTML = `
+      <span>Fibra: <strong>${esc(fiberLabel(recipe.fiber_type))}</strong></span>
+      <span>Color: <strong>${esc(color)}</strong></span>
+      <span>Relación de baño: <strong>${ratio ? `${esc(ratio)}:1` : '—'}</strong></span>
+      <span>Químicos a pesar: <strong>${ings.length}</strong></span>
+      <small>Datos de la receta, no editables aquí</small>`
+
+    if (weight > 0 && ratio) {
+      waterHint.textContent = `Volumen de baño estimado: ${(ratio * weight).toFixed(1)} L (relación ${ratio}:1)`
+    } else if (weight > 0 && !ratio) {
+      waterHint.textContent = 'La receta no tiene relación de baño configurada'
     } else {
-      hint.textContent = 'La receta no tiene relacion de bano configurada'
+      waterHint.textContent = ''
+    }
+
+    if (!machine) {
+      machineHint.textContent = ''
+      machineHint.className = 'form-hint'
+      return
+    }
+    const issues = []
+    if (machine.capacity_kg && weight > Number(machine.capacity_kg)) {
+      issues.push('El peso supera la capacidad de la máquina')
+    }
+    const needWater = ratio && weight > 0 ? ratio * weight : 0
+    if (machine.water_capacity_liters && needWater > Number(machine.water_capacity_liters)) {
+      issues.push('El volumen de baño supera el agua de la máquina')
+    }
+    if (issues.length) {
+      machineHint.className = 'form-hint is-warn'
+      machineHint.textContent = issues.join(' · ')
+    } else {
+      machineHint.className = 'form-hint is-ok'
+      machineHint.textContent = 'Compatible con la relación de baño de la receta'
     }
   }
 
   document.getElementById('pf-submit').onclick = async () => {
-    const errEl  = document.getElementById('pf-error')
+    const errEl = document.getElementById('pf-error')
     const submit = document.getElementById('pf-submit')
-    const recipeId = parseInt(document.getElementById('pf-recipe').value)
-    const weight   = parseFloat(document.getElementById('pf-weight').value)
+    const recipeId = parseInt(document.getElementById('pf-recipe').value, 10)
+    const weight = parseFloat(document.getElementById('pf-weight').value)
+    const when = document.getElementById('pf-when').value
 
     if (!recipeId || !weight || weight <= 0) {
-      errEl.textContent   = 'Receta y peso de fibra son obligatorios'
+      errEl.textContent = 'Receta y peso de fibra son obligatorios'
       errEl.style.display = 'block'
       return
     }
-
-    const machineId = parseInt(document.getElementById('pf-machine').value) || undefined
+    if (!when) {
+      errEl.textContent = 'La fecha y hora programada es obligatoria'
+      errEl.style.display = 'block'
+      return
+    }
 
     submit.disabled = true
     submit.textContent = 'Creando...'
@@ -235,21 +258,20 @@ async function openNewProcessForm(onSuccess) {
 
     try {
       const process = await api.create({
-        recipe_id:       recipeId,
-        machine_id:      machineId,
+        recipe_id: recipeId,
+        machine_id: parseInt(document.getElementById('pf-machine').value, 10) || undefined,
         fiber_weight_kg: weight,
-        fiber_type:      document.getElementById('pf-fiber').value   || undefined,
-        color_reference: document.getElementById('pf-color').value.trim() || undefined,
-        notes:           document.getElementById('pf-notes').value.trim() || undefined,
+        scheduled_at: when || undefined,
+        notes: document.getElementById('pf-notes').value.trim() || undefined,
       })
-      toast.success(`Proceso ${process.batch_number} creado`)
+      toast.success(`Proceso ${process.batch_number} creado. Abriendo pesaje.`)
       closeModal()
       if (onSuccess) onSuccess()
       navigate('weighing', { processId: process.id })
     } catch (err) {
-      errEl.textContent  = err.message
+      errEl.textContent = err.message
       errEl.style.display = 'block'
-      submit.disabled    = false
+      submit.disabled = false
       submit.textContent = 'Crear proceso'
     }
   }

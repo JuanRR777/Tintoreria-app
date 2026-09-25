@@ -12,6 +12,7 @@ class ProcessCreate(BaseModel):
     fiber_type: Optional[str] = None
     fiber_weight_kg: float = Field(..., gt=0)
     color_reference: Optional[str] = None
+    scheduled_at: Optional[str] = None
     notes: Optional[str] = None
 
 

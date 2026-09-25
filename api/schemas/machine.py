@@ -3,15 +3,20 @@ from typing import Optional, Literal
 
 
 MachineType   = Literal["tintura", "lavado", "secado", "cardado", "peinado", "hilado", "otros"]
+EquipmentType = Literal["jet", "overflow", "carretel", "autoclave", "continuo", "barca", "jigger", "otro"]
+DyeFormat     = Literal["madeja", "cono", "ambos"]
 MachineStatus = Literal["active", "maintenance", "inactive"]
 
 
 class MachineCreate(BaseModel):
     name: str = Field(..., min_length=1)
-    code: str = Field(..., min_length=1)
-    machine_type: MachineType
+    code: Optional[str] = None
+    machine_type: MachineType = "tintura"
+    equipment_type: Optional[EquipmentType] = None
+    dye_format: DyeFormat = "ambos"
     capacity_kg: float = 0
     water_capacity_liters: float = 0
+    manufacture_year: Optional[int] = None
     status: MachineStatus = "active"
     manufacturer: Optional[str] = None
     model: Optional[str] = None
@@ -26,8 +31,11 @@ class MachineCreate(BaseModel):
 class MachineUpdate(BaseModel):
     name: Optional[str] = None
     machine_type: Optional[MachineType] = None
+    equipment_type: Optional[EquipmentType] = None
+    dye_format: Optional[DyeFormat] = None
     capacity_kg: Optional[float] = None
     water_capacity_liters: Optional[float] = None
+    manufacture_year: Optional[int] = None
     status: Optional[MachineStatus] = None
     manufacturer: Optional[str] = None
     model: Optional[str] = None

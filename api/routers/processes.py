@@ -13,6 +13,39 @@ from services import sync_service
 router = APIRouter(prefix="/processes", tags=["processes"])
 
 
+_SUGGESTED_LOT_SQL = """
+    (SELECT cl.lot_number FROM chemical_lots cl
+      WHERE cl.chemical_id = c.id AND cl.status = 'active'
+        AND cl.quantity_remaining > 0.0001
+      ORDER BY COALESCE(cl.expiry_date, '9999-12-31') ASC, cl.id ASC
+      LIMIT 1) AS suggested_lot,
+    (SELECT cl.expiry_date FROM chemical_lots cl
+      WHERE cl.chemical_id = c.id AND cl.status = 'active'
+        AND cl.quantity_remaining > 0.0001
+      ORDER BY COALESCE(cl.expiry_date, '9999-12-31') ASC, cl.id ASC
+      LIMIT 1) AS suggested_expiry,
+    (SELECT cl.id FROM chemical_lots cl
+      WHERE cl.chemical_id = c.id AND cl.status = 'active'
+        AND cl.quantity_remaining > 0.0001
+      ORDER BY COALESCE(cl.expiry_date, '9999-12-31') ASC, cl.id ASC
+      LIMIT 1) AS suggested_lot_id
+"""
+
+
+def _ensure_process_columns(conn) -> None:
+    try:
+        conn.execute("ALTER TABLE processes ADD COLUMN scheduled_at TEXT")
+    except Exception:
+        pass
+
+
+def _attach_weigh_totals(process: dict, weighings: list) -> dict:
+    process["weighings"] = weighings
+    process["weigh_total"] = len(weighings)
+    process["weigh_done"] = sum(1 for w in weighings if w.get("status") in ("weighed", "validated"))
+    return process
+
+
 def _calculate_water(bath_ratio: Optional[float], fiber_weight_kg: float) -> Optional[float]:
     if bath_ratio and fiber_weight_kg:
         return round(bath_ratio * fiber_weight_kg, 2)
@@ -28,7 +61,11 @@ def list_processes(
 ):
     query = """
         SELECT p.*, r.code AS recipe_code, r.name AS recipe_name,
-               m.name AS machine_name, u.full_name AS operator_name
+               r.fiber_type AS recipe_fiber, r.color_name AS recipe_color_name,
+               r.color_reference AS recipe_color_ref, r.bath_ratio_l_per_kg,
+               m.name AS machine_name, m.capacity_kg AS machine_capacity_kg,
+               m.equipment_type AS machine_equipment,
+               u.full_name AS operator_name
         FROM processes p
         JOIN recipes r ON p.recipe_id = r.id
         LEFT JOIN machines m ON p.machine_id = m.id
@@ -48,16 +85,44 @@ def list_processes(
     params.append(limit)
 
     with get_db() as conn:
-        rows = conn.execute(query, params).fetchall()
-    return rows_to_list(rows)
+        _ensure_process_columns(conn)
+        rows = rows_to_list(conn.execute(query, params).fetchall())
+        if not rows:
+            return rows
+        ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" * len(ids))
+        weigh_rows = rows_to_list(
+            conn.execute(
+                f"""SELECT pw.id, pw.process_id, pw.status, pw.expected_quantity, pw.unit, pw.actual_quantity,
+                           c.name AS chemical_name, c.code AS chemical_code,
+                           {_SUGGESTED_LOT_SQL}
+                    FROM process_weighings pw
+                    JOIN chemicals c ON pw.chemical_id = c.id
+                    WHERE pw.process_id IN ({placeholders})
+                    ORDER BY pw.id""",
+                ids,
+            ).fetchall()
+        )
+    by_proc: dict[int, list] = {}
+    for w in weigh_rows:
+        by_proc.setdefault(w["process_id"], []).append(w)
+    for row in rows:
+        items = by_proc.get(row["id"], [])
+        row["weighings"] = items
+        row["weigh_total"] = len(items)
+        row["weigh_done"] = sum(1 for w in items if w.get("status") in ("weighed", "validated"))
+    return rows
 
 
 @router.get("/{process_id}")
 def get_process(process_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
+        _ensure_process_columns(conn)
         row = conn.execute(
             """SELECT p.*, r.code AS recipe_code, r.name AS recipe_name,
                       r.bath_ratio_l_per_kg, r.temperature_c AS recipe_temp,
+                      r.fiber_type AS recipe_fiber, r.color_name AS recipe_color_name,
+                      r.color_reference AS recipe_color_ref,
                       m.name AS machine_name, u.full_name AS operator_name
                FROM processes p
                JOIN recipes r ON p.recipe_id = r.id
@@ -71,8 +136,9 @@ def get_process(process_id: int, current_user: dict = Depends(get_current_user))
 
         weighings = rows_to_list(
             conn.execute(
-                """SELECT pw.*, c.name AS chemical_name, c.code AS chemical_code,
-                          cl.lot_number, s.name AS scale_name
+                f"""SELECT pw.*, c.name AS chemical_name, c.code AS chemical_code,
+                          cl.lot_number, s.name AS scale_name,
+                          {_SUGGESTED_LOT_SQL}
                    FROM process_weighings pw
                    JOIN chemicals c ON pw.chemical_id = c.id
                    LEFT JOIN chemical_lots cl ON pw.lot_id = cl.id
@@ -94,8 +160,7 @@ def get_process(process_id: int, current_user: dict = Depends(get_current_user))
             ).fetchall()
         )
 
-    process = row_to_dict(row)
-    process["weighings"] = weighings
+    process = _attach_weigh_totals(row_to_dict(row), weighings)
     process["logs"] = logs
     return process
 
@@ -112,18 +177,21 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
         if not recipe:
             raise HTTPException(status_code=404, detail="Receta no encontrada")
 
+        _ensure_process_columns(conn)
         batch_number = generate_code("batch")
         water_liters = _calculate_water(recipe.get("bath_ratio_l_per_kg"), req.fiber_weight_kg)
+        fiber_type = req.fiber_type or recipe.get("fiber_type")
+        color_ref = req.color_reference or recipe.get("color_name") or recipe.get("color_reference")
 
         conn.execute(
             """INSERT INTO processes
                (batch_number, recipe_id, machine_id, fiber_type, fiber_weight_kg,
-                water_volume_liters, color_reference, operator_id, notes)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                water_volume_liters, color_reference, operator_id, notes, scheduled_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
-                batch_number, req.recipe_id, req.machine_id, req.fiber_type,
-                req.fiber_weight_kg, water_liters, req.color_reference or recipe.get("color_reference"),
-                current_user["id"], req.notes,
+                batch_number, req.recipe_id, req.machine_id, fiber_type,
+                req.fiber_weight_kg, water_liters, color_ref,
+                current_user["id"], req.notes, req.scheduled_at,
             ),
         )
         process_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -270,8 +338,9 @@ def _deduct_stock(conn, process_id: int, user_id: int) -> None:
 def list_weighings(process_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT pw.*, c.name AS chemical_name, c.code AS chemical_code,
-                      cl.lot_number, s.name AS scale_name
+                f"""SELECT pw.*, c.name AS chemical_name, c.code AS chemical_code,
+                      cl.lot_number, s.name AS scale_name,
+                      {_SUGGESTED_LOT_SQL}
                FROM process_weighings pw
                JOIN chemicals c ON pw.chemical_id = c.id
                LEFT JOIN chemical_lots cl ON pw.lot_id = cl.id

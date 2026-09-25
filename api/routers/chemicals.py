@@ -5,10 +5,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from schemas.chemical import ChemicalCreate, ChemicalUpdate, LotCreate, StockAdjustment
+from schemas.chemical import ChemicalCreate, ChemicalUpdate, LotCreate, LotUpdate, StockAdjustment
 from database.connection import get_db, rows_to_list, row_to_dict, generate_code
 from routers.auth import get_current_user
 from services import sync_service
+from services.inventory_sync import migrate_legacy_lot_numbers
 
 router = APIRouter(prefix="/chemicals", tags=["chemicals"])
 
@@ -22,7 +23,30 @@ def list_chemicals(
     current_user:  dict           = Depends(get_current_user),
 ):
     query = """
-        SELECT c.*, u.username AS created_by_name
+        SELECT c.*, u.username AS created_by_name,
+               (SELECT cl.lot_number
+                  FROM chemical_lots cl
+                 WHERE cl.chemical_id = c.id
+                   AND cl.status = 'active'
+                   AND cl.quantity_remaining > 0.0001
+                 ORDER BY COALESCE(cl.expiry_date, '9999-12-31') ASC,
+                          COALESCE(cl.purchase_date, cl.created_at) ASC,
+                          cl.id ASC
+                 LIMIT 1) AS current_lot_number,
+               (SELECT cl.supplier
+                  FROM chemical_lots cl
+                 WHERE cl.chemical_id = c.id
+                   AND cl.status = 'active'
+                   AND cl.quantity_remaining > 0.0001
+                 ORDER BY COALESCE(cl.expiry_date, '9999-12-31') ASC,
+                          COALESCE(cl.purchase_date, cl.created_at) ASC,
+                          cl.id ASC
+                 LIMIT 1) AS current_lot_supplier,
+               (SELECT COUNT(*)
+                  FROM chemical_lots cl
+                 WHERE cl.chemical_id = c.id
+                   AND cl.status = 'active'
+                   AND cl.quantity_remaining > 0.0001) AS active_lot_count
         FROM chemicals c
         LEFT JOIN users u ON c.created_by = u.id
         WHERE c.deleted_at IS NULL AND c.is_active = 1
@@ -30,8 +54,15 @@ def list_chemicals(
     params: list = []
 
     if search:
-        query += " AND (c.name LIKE ? OR c.code LIKE ? OR c.supplier LIKE ?)"
-        params += [f"%{search}%", f"%{search}%", f"%{search}%"]
+        query += """ AND (
+            c.name LIKE ? OR c.code LIKE ? OR c.supplier LIKE ?
+            OR EXISTS (
+                SELECT 1 FROM chemical_lots cl
+                 WHERE cl.chemical_id = c.id AND cl.lot_number LIKE ?
+            )
+        )"""
+        like = f"%{search}%"
+        params += [like, like, like, like]
     if chemical_type:
         query += " AND c.chemical_type = ?"
         params.append(chemical_type)
@@ -44,6 +75,7 @@ def list_chemicals(
     query += " ORDER BY CASE c.procurement_status WHEN 'espera' THEN 0 WHEN 'pedido' THEN 1 ELSE 2 END, c.name"
 
     with get_db() as conn:
+        migrate_legacy_lot_numbers(conn)
         rows = conn.execute(query, params).fetchall()
     return rows_to_list(rows)
 
@@ -135,6 +167,7 @@ def delete_chemical(chemical_id: int, current_user: dict = Depends(get_current_u
 @router.get("/{chemical_id}/lots")
 def list_lots(chemical_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
+        migrate_legacy_lot_numbers(conn, chemical_id)
         rows = conn.execute(
             "SELECT * FROM chemical_lots WHERE chemical_id = ? ORDER BY created_at DESC",
             (chemical_id,),
@@ -184,6 +217,55 @@ def add_lot(chemical_id: int, req: LotCreate, current_user: dict = Depends(get_c
     return row_to_dict(row)
 
 
+@router.put("/{chemical_id}/lots/{lot_id}")
+def update_lot(
+    chemical_id: int,
+    lot_id: int,
+    req: LotUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    expiry = (req.expiry_date or "").strip() or None
+    with get_db() as conn:
+        lot = conn.execute(
+            """SELECT id FROM chemical_lots
+               WHERE id = ? AND chemical_id = ?""",
+            (lot_id, chemical_id),
+        ).fetchone()
+        if not lot:
+            raise HTTPException(status_code=404, detail="Lote no encontrado")
+
+        remaining = conn.execute(
+            "SELECT quantity_remaining FROM chemical_lots WHERE id = ?",
+            (lot_id,),
+        ).fetchone()
+        qty_left = float((remaining["quantity_remaining"] if remaining else 0) or 0)
+        status = None
+        if expiry:
+            today = conn.execute("SELECT date('now')").fetchone()[0]
+            if expiry < today:
+                status = "expired"
+            elif qty_left > 0:
+                status = "active"
+
+        if status:
+            conn.execute(
+                """UPDATE chemical_lots
+                   SET expiry_date = ?, status = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (expiry, status, lot_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE chemical_lots
+                   SET expiry_date = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (expiry, lot_id),
+            )
+        row = conn.execute("SELECT * FROM chemical_lots WHERE id = ?", (lot_id,)).fetchone()
+
+    return row_to_dict(row)
+
+
 # ---------------------------------------------------------------------------
 # Historial de movimientos
 # ---------------------------------------------------------------------------
@@ -196,9 +278,10 @@ def list_movements(
 ):
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT sm.*, u.full_name AS user_name
+            """SELECT sm.*, u.full_name AS user_name, cl.lot_number
                FROM stock_movements sm
                LEFT JOIN users u ON sm.user_id = u.id
+               LEFT JOIN chemical_lots cl ON sm.lot_id = cl.id
                WHERE sm.chemical_id = ?
                ORDER BY sm.created_at DESC
                LIMIT ?""",

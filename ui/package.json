@@ -1,6 +1,6 @@
 {
   "name": "tintoreria-local",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Sistema local de gestion de tintoreria de hilos",
   "main": "electron.js",
   "author": "Tintoreria",
@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "chart.js": "^4.4.1",
-    "electron-updater": "^6.6.2",
+    "electron-updater": "^6.6.2", 
     "sweetalert2": "^11.26.25"
   },
   "devDependencies": {
@@ -77,6 +77,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true,
+      "include": "nsis/installer.nsh",
       "installerLanguages": [
         "es_ES",
         "en_US"

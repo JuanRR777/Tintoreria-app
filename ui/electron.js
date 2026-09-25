@@ -327,8 +327,8 @@ ipcMain.handle('updater-download', async () => {
 
 ipcMain.handle('updater-install', () => {
   if (!app.isPackaged || !autoUpdater) return { ok: false }
-  // isSilent=true → NSIS /S + --updated (sin asistente de instalación)
-  autoUpdater.quitAndInstall(true, true)
+  // isSilent=false → ventana NSIS con progreso; isForceRunAfter=true → reabre la app
+  autoUpdater.quitAndInstall(false, true)
   return { ok: true }
 })
 

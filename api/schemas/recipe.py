@@ -3,7 +3,10 @@ from typing import Optional, List, Literal
 
 
 FiberType = Literal["lana", "algodon", "acrilico", "poliester", "nylon", "seda", "mezcla", "otros"]
-RecipeStatus = Literal["active", "draft", "archived"]
+RecipeStatus = Literal[
+    "active", "inactive", "development", "discarded",
+    "draft", "archived",
+]
 StepType = Literal["pre_lavado", "bano_tinte", "fijacion", "lavado", "enjuague", "secado", "otros"]
 
 
@@ -26,6 +29,7 @@ class RecipeIngredientCreate(BaseModel):
     is_critical: int = 0
     sort_order: int = 0
     notes: Optional[str] = None
+    bath_stage: Optional[str] = None
 
 
 class RecipeCreate(BaseModel):
@@ -39,7 +43,7 @@ class RecipeCreate(BaseModel):
     temperature_c: Optional[float] = None
     process_time_min: Optional[int] = None
     yield_percentage: float = 100
-    status: RecipeStatus = "active"
+    status: RecipeStatus = "development"
     notes: Optional[str] = None
     steps: List[RecipeStepCreate] = []
     ingredients: List[RecipeIngredientCreate] = []
@@ -57,3 +61,5 @@ class RecipeUpdate(BaseModel):
     yield_percentage: Optional[float] = None
     status: Optional[RecipeStatus] = None
     notes: Optional[str] = None
+    steps: Optional[List[RecipeStepCreate]] = None
+    ingredients: Optional[List[RecipeIngredientCreate]] = None

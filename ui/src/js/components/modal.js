@@ -3,8 +3,34 @@
  */
 
 let _resolveConfirm = null
+let _onClose = null
+let _onRequestClose = null
 
-export function openModal(title, bodyHTML, { size = '', footerHTML = '', onClose } = {}) {
+function hideModal() {
+  const overlay = document.getElementById('modal-overlay')
+  overlay.style.display = 'none'
+  const done = _onClose
+  _onClose = null
+  _onRequestClose = null
+  if (done) done()
+  if (_resolveConfirm) { _resolveConfirm(false); _resolveConfirm = null }
+}
+
+async function requestClose() {
+  if (_onRequestClose) {
+    const ok = await _onRequestClose()
+    if (ok === false) return
+  }
+  hideModal()
+}
+
+export function openModal(title, bodyHTML, {
+  size = '',
+  footerHTML = '',
+  onClose,
+  onRequestClose,
+  closeOnOverlay = true,
+} = {}) {
   const overlay = document.getElementById('modal-overlay')
   const box     = document.getElementById('modal-box')
   const titleEl = document.getElementById('modal-title')
@@ -17,25 +43,18 @@ export function openModal(title, bodyHTML, { size = '', footerHTML = '', onClose
 
   box.className = `modal-box${size ? ' modal-' + size : ''}`
   overlay.style.display = 'flex'
+  _onClose = onClose || null
+  _onRequestClose = onRequestClose || null
 
   const closeBtn = document.getElementById('modal-close')
-  const close = () => {
-    overlay.style.display = 'none'
-    if (onClose) onClose()
-    if (_resolveConfirm) { _resolveConfirm(false); _resolveConfirm = null }
-  }
+  closeBtn.onclick = () => { requestClose() }
+  overlay.onclick  = (e) => { if (e.target === overlay && closeOnOverlay) requestClose() }
 
-  closeBtn.onclick = close
-  overlay.onclick  = (e) => { if (e.target === overlay) close() }
-
-  // Retornar el body element para que el caller pueda agregar listeners
   return bodyEl
 }
 
 export function closeModal() {
-  const overlay = document.getElementById('modal-overlay')
-  overlay.style.display = 'none'
-  if (_resolveConfirm) { _resolveConfirm(false); _resolveConfirm = null }
+  hideModal()
 }
 
 /**

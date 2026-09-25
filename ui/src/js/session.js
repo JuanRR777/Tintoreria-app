@@ -34,6 +34,17 @@ export function sessionRoleLabel() {
   return ROLE_LABELS[key] || currentUser?.role_name || 'Usuario'
 }
 
+export function isAdmin() {
+  const raw = currentUser?.permissions
+  let perms = raw
+  if (typeof raw === 'string') {
+    try { perms = JSON.parse(raw) } catch { perms = [] }
+  }
+  if (Array.isArray(perms) && perms.includes('*')) return true
+  const key = sessionRoleKey()
+  return key === 'admin' || key === 'administrador'
+}
+
 export function sessionInitials() {
   const name = sessionDisplayName().trim()
   const parts = name.split(/\s+/).filter(Boolean)

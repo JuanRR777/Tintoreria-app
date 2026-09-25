@@ -13,6 +13,7 @@ import { showView as reportsView }    from './views/reports.js'
 import { showView as settingsView }   from './views/settings.js'
 import { showView as requestsView }   from './views/requests.js'
 import { setPageHeader } from './layout.js'
+import { closeFloatList } from './components/float-list.js'
 
 const VIEWS = {
   dashboard: dashboardView,
@@ -45,6 +46,8 @@ export async function navigate(viewName, params = {}) {
     console.warn(`Vista desconocida: ${viewName}`)
     return
   }
+
+  closeFloatList()
 
   // Limpiar vista anterior si expone un metodo de cleanup
   if (_cleanupCurrent) {

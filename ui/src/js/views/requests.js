@@ -1,6 +1,7 @@
 import { requests as api, peekCache } from '../api.js'
 import { showError, showLoading, showSuccess, showWarning } from '../components/swal.js'
 import { setPageHeader } from '../layout.js'
+import { closeFloatList, isFloatListOpen, openFloatList, updateFloatList } from '../components/float-list.js'
 
 const WAREHOUSE = '10502'
 const ITEMS_PER_PAGE = 3
@@ -83,7 +84,6 @@ export async function showView(container) {
 
   let filter = 'all'
   let cache = { soc: [], occ: [] }
-  const openById = new Set()
   const pageById = new Map()
   const search = document.getElementById('search-requests')
   const chips = container.querySelectorAll('#request-filters [data-filter]')
@@ -98,9 +98,9 @@ export async function showView(container) {
         return group.searchText.includes(query)
       }),
     )
-    renderCards(groups, openById, pageById)
-    bindToggles(openById, pageById, paint)
-    bindPagers(groups, pageById, paint)
+    closeFloatList()
+    renderCards(groups)
+    bindToggles(groups, pageById)
   }
 
   chips.forEach((btn) => {
@@ -426,7 +426,7 @@ function sortRequestItems(items) {
   return [...waiting, ...ordered]
 }
 
-function renderCards(groups, openById, pageById) {
+function renderCards(groups) {
   const list = document.getElementById('requests-list')
   if (!list) return
 
@@ -448,7 +448,7 @@ function renderCards(groups, openById, pageById) {
       <h3>Solicitudes <span>(${groups.length})</span></h3>
     </div>
     <div class="req-grid">
-      ${groups.map((group) => requestCard(group, openById, pageById)).join('')}
+      ${groups.map((group) => requestCard(group)).join('')}
     </div>`
 }
 
@@ -462,30 +462,50 @@ function pageState(group, pageById) {
   return { page, totalPages, start, slice: group.items.slice(start, start + ITEMS_PER_PAGE) }
 }
 
-function bindToggles(openById, pageById, paint) {
+function bindToggles(groups, pageById) {
+  const byId = new Map(groups.map((g) => [String(g.id), g]))
   document.querySelectorAll('[data-req-toggle]').forEach((btn) => {
-    btn.onclick = () => {
-      const id = btn.dataset.reqToggle
-      if (openById.has(id)) openById.delete(id)
-      else {
-        openById.add(id)
-        if (!pageById.has(id)) pageById.set(id, 1)
+    btn.onclick = (e) => {
+      e.stopPropagation()
+      if (isFloatListOpen(btn)) {
+        closeFloatList()
+        return
       }
-      paint()
+      const group = byId.get(String(btn.dataset.reqToggle))
+      if (!group) return
+      if (!pageById.has(group.id)) pageById.set(group.id, 1)
+      showReqItems(btn, group, pageById)
     }
   })
 }
 
-function bindPagers(groups, pageById, paint) {
-  document.querySelectorAll('[data-req-dir]').forEach((btn) => {
-    btn.onclick = () => {
-      const group = groups.find((item) => item.id === btn.dataset.id)
-      if (!group) return
+function reqItemsHtml(group, pageById) {
+  const { page, totalPages, slice } = pageState(group, pageById)
+  return `
+    <ul class="req-items">${renderItemSlice(slice)}</ul>
+    <div class="req-pager ${totalPages > 1 ? '' : 'is-disabled'}">
+      <button type="button" class="req-pager-btn" data-id="${esc(group.id)}" data-req-dir="-1" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
+      <span>${page} / ${totalPages}</span>
+      <button type="button" class="req-pager-btn" data-id="${esc(group.id)}" data-req-dir="1" ${page >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>
+    </div>`
+}
+
+function bindReqFloat(panel, btn, group, pageById) {
+  panel.querySelectorAll('[data-req-dir]').forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation()
       const { page, totalPages } = pageState(group, pageById)
-      pageById.set(group.id, Math.min(totalPages, Math.max(1, page + Number(btn.dataset.reqDir))))
-      paint()
+      pageById.set(group.id, Math.min(totalPages, Math.max(1, page + Number(el.dataset.reqDir))))
+      showReqItems(btn, group, pageById)
     }
   })
+}
+
+function showReqItems(btn, group, pageById) {
+  const html = reqItemsHtml(group, pageById)
+  const opts = { onBind: (panel) => bindReqFloat(panel, btn, group, pageById) }
+  if (isFloatListOpen(btn)) updateFloatList(html, opts)
+  else openFloatList(btn, html, opts)
 }
 
 function buildStepper(g) {
@@ -546,10 +566,8 @@ function buildStepper(g) {
   })
 }
 
-function requestCard(g, openById, pageById) {
-  const open = openById.has(g.id)
+function requestCard(g) {
   const steps = buildStepper(g)
-  const { page, totalPages, slice } = pageState(g, pageById)
   const party = g.suppliers[0] || g.requesters[0] || 'Sin proveedor'
   const extraParty = g.suppliers.length > 1 ? ` +${g.suppliers.length - 1}` : ''
   const unit = g.unit || 'KG'
@@ -603,18 +621,10 @@ function requestCard(g, openById, pageById) {
         </div>
       </div>
 
-      <button type="button" class="req-toggle ${open ? 'is-open' : ''}" data-req-toggle="${esc(g.id)}" aria-expanded="${open ? 'true' : 'false'}">
+      <button type="button" class="req-toggle" data-req-toggle="${esc(g.id)}" aria-expanded="false">
         <span>${summary}</span>
         ${ICON_CHEVRON}
       </button>
-      ${open ? `
-        <ul class="req-items">${renderItemSlice(slice)}</ul>
-        <div class="req-pager ${totalPages > 1 ? '' : 'is-disabled'}">
-          <button type="button" class="req-pager-btn" data-id="${esc(g.id)}" data-req-dir="-1" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
-          <span>${page} / ${totalPages}</span>
-          <button type="button" class="req-pager-btn" data-id="${esc(g.id)}" data-req-dir="1" ${page >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>
-        </div>
-      ` : ''}
     </article>`
 }
 

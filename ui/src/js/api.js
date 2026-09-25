@@ -117,6 +117,7 @@ export const chemicals = {
   delete:      (id)          => api.delete(`/chemicals/${id}`),
   lots:        (id)          => api.get(`/chemicals/${id}/lots`),
   addLot:      (id, d)       => api.post(`/chemicals/${id}/lots`, d),
+  updateLot:   (id, lotId, d) => api.put(`/chemicals/${id}/lots/${lotId}`, d),
   movements:   (id)          => api.get(`/chemicals/${id}/movements`),
 }
 

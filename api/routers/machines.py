@@ -6,9 +6,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from schemas.machine import MachineCreate, MachineUpdate, ScaleCreate, ScaleUpdate
-from database.connection import get_db, rows_to_list, row_to_dict
+from database.connection import get_db, rows_to_list, row_to_dict, generate_code, ensure_machines_schema
 from routers.auth import get_current_user
 from services import scale_service
+
+
+def decorate_machine(row: dict | None) -> dict | None:
+    if not row:
+        return row
+    cap = float(row.get("capacity_kg") or 0)
+    water = float(row.get("water_capacity_liters") or 0)
+    row["bath_ratio_l_per_kg"] = round(water / cap, 1) if cap > 0 and water > 0 else None
+    return row
 
 router = APIRouter(tags=["machines"])
 
@@ -20,34 +29,40 @@ router = APIRouter(tags=["machines"])
 @router.get("/machines")
 def list_machines(current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
+        ensure_machines_schema(conn)
         rows = conn.execute(
             "SELECT * FROM machines ORDER BY code"
         ).fetchall()
-    return rows_to_list(rows)
+    return [decorate_machine(r) for r in rows_to_list(rows)]
 
 
 @router.get("/machines/{machine_id}")
 def get_machine(machine_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
+        ensure_machines_schema(conn)
         row = conn.execute("SELECT * FROM machines WHERE id = ?", (machine_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Maquina no encontrada")
-    return row_to_dict(row)
+    return decorate_machine(row_to_dict(row))
 
 
 @router.post("/machines", status_code=201)
 def create_machine(req: MachineCreate, current_user: dict = Depends(get_current_user)):
+    ensure_machines_schema()
+    code = (req.code or "").strip() or generate_code("machine")
     with get_db() as conn:
-        if conn.execute("SELECT id FROM machines WHERE code = ?", (req.code,)).fetchone():
-            raise HTTPException(status_code=409, detail=f"El codigo '{req.code}' ya existe")
+        if conn.execute("SELECT id FROM machines WHERE code = ?", (code,)).fetchone():
+            raise HTTPException(status_code=409, detail=f"El codigo '{code}' ya existe")
         conn.execute(
             """INSERT INTO machines
-               (name, code, machine_type, capacity_kg, water_capacity_liters, status,
+               (name, code, machine_type, equipment_type, dye_format, capacity_kg,
+                water_capacity_liters, manufacture_year, status,
                 manufacturer, model, serial_number, installation_date, last_maintenance,
                 next_maintenance_due, description, notes)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                req.name, req.code, req.machine_type, req.capacity_kg, req.water_capacity_liters,
+                req.name, code, req.machine_type, req.equipment_type, req.dye_format,
+                req.capacity_kg, req.water_capacity_liters, req.manufacture_year,
                 req.status, req.manufacturer, req.model, req.serial_number,
                 req.installation_date, req.last_maintenance, req.next_maintenance_due,
                 req.description, req.notes,
@@ -55,7 +70,7 @@ def create_machine(req: MachineCreate, current_user: dict = Depends(get_current_
         )
         machine_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         row = conn.execute("SELECT * FROM machines WHERE id = ?", (machine_id,)).fetchone()
-    return row_to_dict(row)
+    return decorate_machine(row_to_dict(row))
 
 
 @router.put("/machines/{machine_id}")
@@ -68,12 +83,13 @@ def update_machine(machine_id: int, req: MachineUpdate, current_user: dict = Dep
     values = list(fields.values()) + [machine_id]
 
     with get_db() as conn:
+        ensure_machines_schema(conn)
         conn.execute(
             f"UPDATE machines SET {set_clause}, updated_at = datetime('now') WHERE id = ?",
             values,
         )
         row = conn.execute("SELECT * FROM machines WHERE id = ?", (machine_id,)).fetchone()
-    return row_to_dict(row)
+    return decorate_machine(row_to_dict(row))
 
 
 @router.delete("/machines/{machine_id}")

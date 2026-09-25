@@ -54,6 +54,10 @@ class LotCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class LotUpdate(BaseModel):
+    expiry_date: Optional[str] = None
+
+
 class StockAdjustment(BaseModel):
     lot_id: Optional[int] = None
     movement_type: MovementType

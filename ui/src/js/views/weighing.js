@@ -1,12 +1,16 @@
 /**
- * Vista de Pesaje - modulo mas critico del sistema
- * Integra WebSocket con bascula + lista de ingredientes + confirmacion de pesajes
+ * Pesaje de los químicos de la receta del proceso.
+ * La báscula queda como apoyo opcional para tomar el peso real.
  */
 import { processes as api, scales, openScaleSocket } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { confirm } from '../components/modal.js'
 import { navigate } from '../router.js'
 import { setPageHeader } from '../layout.js'
+import {
+  esc, fmtQty, isWeighed, lotLine, processMetaLine, processStage,
+  renderStepper, stageBadge, weighCounts,
+} from '../components/process-ui.js'
 
 let _ws       = null
 let _scaleId  = null
@@ -14,7 +18,7 @@ let _scaleId  = null
 export async function showView(container, params = {}) {
   setPageHeader({
     title: 'Pesaje',
-    subtitle: 'Control de dosificacion con bascula en tiempo real',
+    subtitle: 'Confirma los químicos de la receta e inicia la tinción',
   })
   container.innerHTML = `
     <div id="weighing-content"></div>
@@ -29,56 +33,64 @@ export async function showView(container, params = {}) {
 
   await renderWeighingPanel(document.getElementById('weighing-content'), processId)
 
-  // Retornar funcion de cleanup para cerrar WebSocket al navegar
   return () => {
     if (_ws) { _ws.close(); _ws = null }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Selector de proceso activo
-// ---------------------------------------------------------------------------
-
 async function renderProcessSelector(container) {
   try {
-    const data = await api.list({ status: 'in_progress' })
-    const pending = await api.list({ status: 'pending' })
-    const all = [...data, ...pending]
+    const [pending, active, paused] = await Promise.all([
+      api.list({ status: 'pending' }),
+      api.list({ status: 'in_progress' }),
+      api.list({ status: 'paused' }),
+    ])
+    const all = [...pending, ...active, ...paused]
+
+    if (!all.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <h3>Sin procesos para pesar</h3>
+          <p>Crea un proceso desde la vista de Procesos. Al crearlo se abrirá el pesaje de la receta.</p>
+          <button type="button" class="btn btn-primary" id="btn-go-processes">Ir a Procesos</button>
+        </div>`
+      document.getElementById('btn-go-processes').onclick = () => navigate('processes')
+      return
+    }
 
     container.innerHTML = `
-      <div class="card" style="max-width:600px;margin:0 auto">
-        <div class="card-header"><h3 class="card-title">Seleccionar proceso activo</h3></div>
-        <div class="card-body">
-          ${all.length
-            ? `<div class="form-group">
-                <label class="form-label">Proceso</label>
-                <select id="process-selector" class="form-select">
-                  <option value="">Seleccionar...</option>
-                  ${all.map(p => `<option value="${p.id}">[${p.batch_number}] ${p.recipe_name} - ${p.fiber_weight_kg} kg</option>`).join('')}
-                </select>
-               </div>
-               <button class="btn btn-primary" id="btn-open-weighing">Abrir pesaje</button>`
-            : '<p style="color:var(--text-muted);margin:0">No hay procesos en curso. Crea un proceso desde la vista de Procesos.</p>'
-          }
-        </div>
-      </div>
-    `
+      <div class="proc-grid">
+        ${all.map((p) => {
+          const stage = processStage(p, { inWeighing: true })
+          const [cls, label] = stageBadge(stage, p.status)
+          const { done, total } = weighCounts(p)
+          return `
+            <article class="proc-card">
+              <header class="proc-card-top">
+                <div>
+                  <p class="proc-card-code">${esc(p.batch_number)}</p>
+                  <p class="proc-card-meta">${esc(processMetaLine(p))}</p>
+                </div>
+                <span class="badge ${cls}">${label}</span>
+              </header>
+              ${renderStepper(stage)}
+              <p class="proc-weigh-count">${done} de ${total} pesados</p>
+              <footer class="proc-card-actions">
+                <button type="button" class="btn btn-primary btn-sm" data-weighing="${p.id}">
+                  ${done ? 'Continuar pesaje' : 'Comenzar pesaje'}
+                </button>
+              </footer>
+            </article>`
+        }).join('')}
+      </div>`
 
-    if (all.length) {
-      document.getElementById('btn-open-weighing').onclick = () => {
-        const id = parseInt(document.getElementById('process-selector').value)
-        if (!id) { toast.warning('Selecciona un proceso'); return }
-        navigate('weighing', { processId: id })
-      }
-    }
+    container.querySelectorAll('[data-weighing]').forEach((btn) => {
+      btn.onclick = () => navigate('weighing', { processId: parseInt(btn.dataset.weighing, 10) })
+    })
   } catch (err) {
     container.innerHTML = `<div class="empty-state"><p>${err.message}</p></div>`
   }
 }
-
-// ---------------------------------------------------------------------------
-// Panel principal de pesaje
-// ---------------------------------------------------------------------------
 
 async function renderWeighingPanel(container, processId) {
   try {
@@ -88,211 +100,180 @@ async function renderWeighingPanel(container, processId) {
       scales.list(),
     ])
 
-    _scaleId = scaleList[0]?.id || null
+    process.weighings = weighings
+    _scaleId = _scaleId || scaleList[0]?.id || null
 
-    const canWeigh = ['pending', 'in_progress'].includes(process.status)
+    const canWeigh = ['pending', 'in_progress', 'paused'].includes(process.status)
+    const { done, total } = weighCounts(process, weighings)
+    const stage = processStage(process, { inWeighing: true })
+    const [cls, label] = stageBadge(stage, process.status)
+    const allWeighed = total > 0 && done >= total
+    const canConfirm = canWeigh && total > 0 && !allWeighed
+    const canStartDye = canWeigh && allWeighed && process.status !== 'in_progress'
 
     container.innerHTML = `
-      <div class="weighing-layout">
-
-        <!-- Panel izq: bascula y proceso -->
-        <div class="weighing-left">
-
-          <!-- Info proceso -->
-          <div class="card" style="margin-bottom:12px">
-            <div class="card-body" style="padding:14px 18px">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-                <span style="font-size:18px;font-weight:700">${process.batch_number}</span>
-                <span class="badge ${process.status === 'in_progress' ? 'badge-blue' : 'badge-gray'}">${process.status}</span>
-              </div>
-              <div style="font-size:13px;color:var(--text-muted)">
-                Receta: <strong style="color:var(--text-primary)">${process.recipe_name}</strong>
-                &nbsp;&middot;&nbsp; Fibra: <strong style="color:var(--text-primary)">${process.fiber_weight_kg} kg</strong>
-                &nbsp;&middot;&nbsp; Bano: <strong style="color:var(--text-primary)">${process.water_volume_liters ? process.water_volume_liters + ' L' : '-'}</strong>
-              </div>
+      <div class="weigh-page">
+        <article class="proc-card">
+          <header class="proc-card-top">
+            <div>
+              <p class="proc-card-code">${esc(process.batch_number)}</p>
+              <p class="proc-card-meta">${esc(processMetaLine(process))}</p>
             </div>
-          </div>
+            <span class="badge ${cls}">${label}</span>
+          </header>
+          ${renderStepper(stage)}
+        </article>
 
-          <!-- Display bascula -->
-          <div class="card" style="margin-bottom:12px">
-            <div class="card-header">
-              <h3 class="card-title">Bascula</h3>
-              <div style="display:flex;align-items:center;gap:8px">
-                <select id="scale-select" class="form-select" style="width:200px;font-size:12px">
-                  <option value="">Sin bascula</option>
-                  ${scaleList.map(s => `<option value="${s.id}" ${s.id === _scaleId ? 'selected' : ''}>${s.name} (${s.port})</option>`).join('')}
+        <article class="proc-card">
+          ${weighings.length ? `
+            <div class="proc-weigh weigh-list">
+              ${weighings.map((w) => weighRow(w, canWeigh)).join('')}
+            </div>
+            <div class="weigh-list-footer">
+              <p class="proc-weigh-count" id="weighing-progress">${done} de ${total} pesados</p>
+              ${canWeigh && total > 0 && (canConfirm || canStartDye) ? `
+                <button type="button" class="btn btn-primary" id="btn-confirm-weigh" disabled>
+                  Confirmar pesaje e iniciar tiñendo
+                </button>` : ''}
+            </div>
+          ` : `
+            <p class="proc-weigh-empty">Esta receta no tiene químicos para pesar.</p>
+            <footer class="proc-card-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-back-processes">Volver a procesos</button>
+            </footer>
+          `}
+        </article>
+
+        ${canWeigh ? `
+          <details class="card weigh-scale">
+            <summary>Báscula (opcional)</summary>
+            <div class="weigh-scale-body">
+              <div class="weigh-scale-toolbar">
+                <select id="scale-select" class="form-select">
+                  <option value="">Sin báscula</option>
+                  ${scaleList.map((s) => `<option value="${s.id}" ${s.id === _scaleId ? 'selected' : ''}>${esc(s.name)} (${esc(s.port)})</option>`).join('')}
                 </select>
-                <button class="btn btn-ghost btn-sm" id="btn-connect-scale">Conectar</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-connect-scale">Conectar</button>
               </div>
-            </div>
-            <div class="card-body" style="padding:20px;text-align:center">
               <div class="weight-display" id="weight-display">
                 <div class="weight-value" id="weight-value">---</div>
                 <div class="weight-unit">kg</div>
-                <div class="weight-status" id="weight-status">Sin conexion</div>
+                <div class="weight-status" id="weight-status">Sin conexión</div>
               </div>
-              <div id="ws-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)">WebSocket desconectado</div>
+              <div id="ws-status" class="form-hint">WebSocket desconectado</div>
             </div>
-          </div>
+          </details>
+        ` : ''}
 
-          <!-- Acciones de proceso -->
-          ${canWeigh ? `
-            <div class="card">
-              <div class="card-body" style="padding:14px 18px;display:flex;gap:8px;flex-wrap:wrap">
-                ${process.status === 'pending'
-                  ? `<button class="btn btn-primary" id="btn-start">Iniciar proceso</button>`
-                  : `<button class="btn btn-success" id="btn-complete">Marcar completado</button>
-                     <button class="btn btn-ghost" id="btn-pause">Pausar</button>`
-                }
-                <button class="btn btn-ghost text-danger" id="btn-cancel-proc">Cancelar proceso</button>
-              </div>
-            </div>` : ''
-          }
-        </div>
-
-        <!-- Panel der: ingredientes -->
-        <div class="weighing-right">
-          <div class="card">
-            <div class="card-header">
-              <h3 class="card-title">Ingredientes del lote</h3>
-              <div style="font-size:12px;color:var(--text-muted)" id="weighing-progress"></div>
-            </div>
-            <div id="ingredients-list"></div>
-          </div>
-        </div>
-
+        ${process.status === 'in_progress' && allWeighed ? `
+          <footer class="proc-card-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-back-processes">Volver a procesos</button>
+            <button type="button" class="btn btn-success btn-sm" id="btn-complete">Marcar completado</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-pause">Pausar</button>
+            <button type="button" class="btn btn-ghost btn-sm text-danger" id="btn-cancel-proc">Cancelar proceso</button>
+          </footer>
+        ` : canWeigh ? `
+          <footer class="proc-card-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-back-processes">Volver a procesos</button>
+            <button type="button" class="btn btn-ghost btn-sm text-danger" id="btn-cancel-proc">Cancelar proceso</button>
+          </footer>
+        ` : `
+          <footer class="proc-card-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-back-processes">Volver a procesos</button>
+          </footer>
+        `}
       </div>
     `
 
-    renderIngredients(weighings, canWeigh, process)
+    bindWeighChecks(container, weighings, canWeigh)
+    const confirmBtn = document.getElementById('btn-confirm-weigh')
+    if (confirmBtn) {
+      confirmBtn.onclick = () => confirmWeighAndStart(process, weighings, processId)
+      syncConfirmButton(weighings)
+    }
+    document.getElementById('btn-back-processes')?.addEventListener('click', () => navigate('processes'))
     setupScaleControls()
     setupProcessActions(process, processId)
-
   } catch (err) {
     container.innerHTML = `<div class="empty-state"><p>${err.message}</p></div>`
   }
 }
 
-// ---------------------------------------------------------------------------
-// Render lista de ingredientes
-// ---------------------------------------------------------------------------
-
-function renderIngredients(weighings, canWeigh, process) {
-  const container = document.getElementById('ingredients-list')
-  const progress  = document.getElementById('weighing-progress')
-  if (!container) return
-
-  const done  = weighings.filter(w => w.actual_quantity !== null).length
-  const total = weighings.length
-
-  if (progress) progress.textContent = `${done} / ${total} pesados`
-
-  if (!weighings.length) {
-    container.innerHTML = '<div class="empty-state" style="padding:30px"><p>Sin ingredientes en esta receta</p></div>'
-    return
-  }
-
-  container.innerHTML = weighings.map(w => {
-    const weighed = w.actual_quantity !== null
-    const variance = weighed ? ((w.actual_quantity - w.expected_quantity) / w.expected_quantity * 100) : null
-    const isOk    = variance !== null && Math.abs(variance) <= (w.tolerance_percent || 5)
-    const isWarn  = variance !== null && !isOk && Math.abs(variance) <= 15
-    const isError = variance !== null && Math.abs(variance) > 15
-
-    const rowClass = weighed
-      ? (isOk ? 'weighing-row ok' : isWarn ? 'weighing-row warn' : 'weighing-row error')
-      : 'weighing-row'
-
-    return `
-      <div class="${rowClass}" data-wid="${w.id}">
-        <div class="weighing-row-header">
-          <div class="weighing-chemical-name">${w.chemical_name}</div>
-          ${w.chemical_code ? `<code style="font-size:11px;color:var(--text-muted)">${w.chemical_code}</code>` : ''}
-        </div>
-        <div class="weighing-amounts">
-          <div class="weighing-amount-block">
-            <div class="amount-label">Esperado</div>
-            <div class="amount-value">${Number(w.expected_quantity).toFixed(3)} ${w.unit}</div>
-          </div>
-          ${weighed ? `
-            <div class="weighing-amount-block">
-              <div class="amount-label">Real</div>
-              <div class="amount-value actual ${isOk ? 'ok' : isWarn ? 'warn' : 'error'}">
-                ${Number(w.actual_quantity).toFixed(3)} ${w.unit}
-              </div>
-            </div>
-            <div class="weighing-amount-block">
-              <div class="amount-label">Variacion</div>
-              <div class="amount-value ${isOk ? 'ok' : isWarn ? 'warn' : 'error'}">
-                ${variance > 0 ? '+' : ''}${variance.toFixed(2)}%
-              </div>
-            </div>
-          ` : '<div class="weighing-amount-block"><div class="amount-label">Pendiente de pesaje</div></div>'}
-        </div>
-        ${canWeigh && !weighed ? `
-          <div class="weighing-actions">
-            <input class="form-input actual-input" data-wid="${w.id}" type="number" min="0" step="0.001"
-              placeholder="Cantidad real" style="width:140px"
-              title="Puedes usar el peso de la bascula con el boton Aplicar peso">
-            <button class="btn btn-ghost btn-sm" id="apply-scale-${w.id}" title="Usar peso actual de la bascula">Aplicar peso</button>
-            <button class="btn btn-primary btn-sm confirm-weighing" data-wid="${w.id}">Confirmar</button>
-          </div>
-        ` : ''}
+function weighRow(w, canWeigh) {
+  const weighed = isWeighed(w)
+  return `
+    <label class="proc-weigh-row ${weighed ? 'is-done' : ''}">
+      <div>
+        <strong>${esc(w.chemical_name)}</strong>
+        <span>${esc(lotLine(w))}</span>
       </div>
-    `
-  }).join('')
-
-  // Listeners para confirmar pesaje
-  if (canWeigh) {
-    container.querySelectorAll('.confirm-weighing').forEach(btn => {
-      btn.onclick = () => confirmWeighing(parseInt(btn.dataset.wid), process)
-    })
-    container.querySelectorAll('[id^="apply-scale-"]').forEach(btn => {
-      btn.onclick = () => {
-        const wid = btn.id.replace('apply-scale-', '')
-        const weightValue = document.getElementById('weight-value')?.textContent
-        const parsed = parseFloat(weightValue)
-        if (!isNaN(parsed)) {
-          const input = container.querySelector(`input.actual-input[data-wid="${wid}"]`)
-          if (input) input.value = parsed.toFixed(3)
-        } else {
-          toast.warning('No hay lectura valida de la bascula')
-        }
-      }
-    })
-  }
+      <em>${esc(fmtQty(w.expected_quantity, w.unit))}</em>
+      <input type="checkbox" class="weigh-check" data-wid="${w.id}"
+        ${weighed ? 'checked disabled' : ''}
+        ${!canWeigh && !weighed ? 'disabled' : ''}
+        aria-label="Marcar ${esc(w.chemical_name)} como pesado">
+    </label>`
 }
 
-async function confirmWeighing(wid, process) {
-  const input = document.querySelector(`input.actual-input[data-wid="${wid}"]`)
-  const value = parseFloat(input?.value)
+function bindWeighChecks(container, weighings, canWeigh) {
+  if (!canWeigh) return
+  container.querySelectorAll('.weigh-check').forEach((box) => {
+    box.addEventListener('change', () => syncConfirmButton(weighings))
+  })
+}
 
-  if (!value || value <= 0) {
-    toast.warning('Ingresa una cantidad valida antes de confirmar')
+function syncConfirmButton(weighings) {
+  const btn = document.getElementById('btn-confirm-weigh')
+  const progress = document.getElementById('weighing-progress')
+  if (!btn) return
+  const checked = new Set(
+    [...document.querySelectorAll('.weigh-check:checked')].map((el) => Number(el.dataset.wid))
+  )
+  const marked = weighings.filter((w) => isWeighed(w) || checked.has(w.id)).length
+  if (progress) progress.textContent = `${marked} de ${weighings.length} pesados`
+  btn.disabled = marked < weighings.length || weighings.length === 0
+}
+
+function currentScaleWeight() {
+  const raw = document.getElementById('weight-value')?.textContent
+  const value = parseFloat(String(raw || '').replace(',', '.'))
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+async function confirmWeighAndStart(process, weighings, processId) {
+  const btn = document.getElementById('btn-confirm-weigh')
+  const checked = new Set(
+    [...document.querySelectorAll('.weigh-check:checked')].map((el) => Number(el.dataset.wid))
+  )
+  const pending = weighings.filter((w) => !isWeighed(w))
+  if (pending.some((w) => !checked.has(w.id))) {
+    toast.warning('Marca todos los químicos de la receta para confirmar el pesaje')
     return
   }
+
+  btn.disabled = true
+  btn.textContent = 'Confirmando...'
+  const scaleWeight = currentScaleWeight()
 
   try {
-    await api.updateWeighing(process.id, wid, { actual_quantity: value })
-
-    // Activar proceso si estaba pendiente
-    if (process.status === 'pending') {
+    for (const w of pending) {
+      await api.updateWeighing(process.id, w.id, {
+        actual_quantity: scaleWeight && pending.length === 1 ? scaleWeight : w.expected_quantity,
+        lot_id: w.lot_id || w.suggested_lot_id || undefined,
+        scale_id: _scaleId || undefined,
+      })
+    }
+    if (process.status !== 'in_progress') {
       await api.updateStatus(process.id, { status: 'in_progress' })
     }
-
-    toast.success('Pesaje confirmado')
-
-    // Recargar pesajes
-    const weighings = await api.weighings(process.id)
-    renderIngredients(weighings, true, process)
+    toast.success('Pesaje confirmado. El proceso pasó a tiñendo.')
+    await renderWeighingPanel(document.getElementById('weighing-content'), processId)
   } catch (err) {
     toast.error(err.message)
+    btn.disabled = false
+    btn.textContent = 'Confirmar pesaje e iniciar tiñendo'
   }
 }
-
-// ---------------------------------------------------------------------------
-// Bascula WebSocket
-// ---------------------------------------------------------------------------
 
 function setupScaleControls() {
   const connectBtn  = document.getElementById('btn-connect-scale')
@@ -300,18 +281,19 @@ function setupScaleControls() {
   if (!connectBtn) return
 
   connectBtn.onclick = () => {
-    const id = parseInt(scaleSelect.value)
-    if (!id) { toast.warning('Selecciona una bascula'); return }
+    const id = parseInt(scaleSelect.value, 10)
+    if (!id) { toast.warning('Selecciona una báscula'); return }
 
     if (_ws) {
       _ws.close()
       _ws = null
       connectBtn.textContent = 'Conectar'
-      document.getElementById('ws-status').textContent = 'Desconectado'
+      const status = document.getElementById('ws-status')
+      if (status) status.textContent = 'Desconectado'
       return
     }
 
-    connectBtn.textContent = 'Desconectando...'
+    connectBtn.textContent = 'Conectando...'
     _scaleId = id
     connectScale(id, connectBtn)
   }
@@ -332,41 +314,26 @@ function connectScale(scaleId, btn) {
         weightStatusEl.textContent = data.stable ? 'ESTABLE' : 'Estabilizando...'
         weightStatusEl.className = `weight-status ${data.stable ? 'stable' : 'unstable'}`
       }
-      if (wsStatusEl) wsStatusEl.textContent = `Conectado - Puerto: ${data.port || scaleId}`
+      if (wsStatusEl) wsStatusEl.textContent = `Conectado · Puerto: ${data.port || scaleId}`
       if (btn) btn.textContent = 'Desconectar'
     },
     (err) => {
-      if (weightStatusEl) { weightStatusEl.textContent = 'Sin conexion'; weightStatusEl.className = 'weight-status' }
-      if (wsStatusEl) wsStatusEl.textContent = `Error: ${err.message || 'Conexion perdida'}`
+      if (weightStatusEl) { weightStatusEl.textContent = 'Sin conexión'; weightStatusEl.className = 'weight-status' }
+      if (wsStatusEl) wsStatusEl.textContent = `Error: ${err.message || 'Conexión perdida'}`
       if (btn) btn.textContent = 'Reconectar'
       _ws = null
     }
   )
 }
 
-// ---------------------------------------------------------------------------
-// Acciones de proceso
-// ---------------------------------------------------------------------------
-
 function setupProcessActions(process, processId) {
-  const startBtn    = document.getElementById('btn-start')
   const completeBtn = document.getElementById('btn-complete')
   const pauseBtn    = document.getElementById('btn-pause')
   const cancelBtn   = document.getElementById('btn-cancel-proc')
 
-  if (startBtn) {
-    startBtn.onclick = async () => {
-      try {
-        await api.updateStatus(processId, { status: 'in_progress' })
-        toast.success('Proceso iniciado')
-        navigate('weighing', { processId })
-      } catch (err) { toast.error(err.message) }
-    }
-  }
-
   if (completeBtn) {
     completeBtn.onclick = async () => {
-      const ok = await confirm('Completar proceso. Se descontara el stock de quimicos utilizado.', 'Completar proceso')
+      const ok = await confirm('Completar proceso. Se descontará el stock de químicos utilizado.', 'Completar proceso')
       if (!ok) return
       try {
         await api.updateStatus(processId, { status: 'completed' })
@@ -388,7 +355,7 @@ function setupProcessActions(process, processId) {
 
   if (cancelBtn) {
     cancelBtn.onclick = async () => {
-      const ok = await confirm('Cancelar este proceso. No se descontara stock.', 'Cancelar proceso')
+      const ok = await confirm('Cancelar este proceso. No se descontará stock.', 'Cancelar proceso')
       if (!ok) return
       try {
         await api.updateStatus(processId, { status: 'cancelled' })

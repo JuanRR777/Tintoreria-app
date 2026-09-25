@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
+
 from services.chemical_type import reclassify_otros, resolved_type
+
+_COMPACT_LOT_RE = re.compile(r"^\d{4}C\d+$")
+_LEGACY_LOT_RE = re.compile(r"^(?:OCC-)?0*(\d+)-0*(\d+)$", re.IGNORECASE)
 
 WAREHOUSE = "10502"
 
@@ -205,10 +211,81 @@ def _occ_line(conn, row: dict):
     ).fetchone()
 
 
-def _lot_number(row: dict) -> str:
+def _digits_no_zeros(value) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits.lstrip("0") or "0"
+
+
+def _parse_entry_date(when) -> datetime | None:
+    if not when:
+        return None
+    text = str(when).strip().replace("Z", "").replace("T", " ")
+    for fmt, size in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)):
+        try:
+            return datetime.strptime(text[:size], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _entry_yymm(when) -> str:
+    parsed = _parse_entry_date(when) or datetime.now()
+    return parsed.strftime("%y%m")
+
+
+def compact_purchase_lot(occ_number, item_code, when=None) -> str:
+    """YYMM + C + OCC sin ceros + item sin ceros. Ej: 2609C3045427912."""
+    return f"{_entry_yymm(when)}C{_digits_no_zeros(occ_number)}{_digits_no_zeros(item_code)}"
+
+
+def _legacy_lot_number(row: dict) -> str:
     occ = (row.get("occ_number") or "OCC").strip()
     code = (row.get("item_code") or "").strip()
     return f"{occ}-{code}" if code else occ
+
+
+def _lot_number(row: dict, when=None) -> str:
+    return compact_purchase_lot(row.get("occ_number"), row.get("item_code"), when)
+
+
+def _existing_occ_lot(conn, chemical_id: int, row: dict, lot_no: str):
+    occ_d = _digits_no_zeros(row.get("occ_number"))
+    item_d = _digits_no_zeros(row.get("item_code"))
+    glob = f"????C{occ_d}{item_d}"
+    return conn.execute(
+        """SELECT id, lot_number, purchase_date, created_at FROM chemical_lots
+           WHERE chemical_id = ?
+             AND (lot_number = ? OR lot_number = ? OR lot_number GLOB ?)
+           ORDER BY id ASC""",
+        (chemical_id, lot_no, _legacy_lot_number(row), glob),
+    ).fetchone()
+
+
+def migrate_legacy_lot_numbers(conn, chemical_id: int | None = None) -> int:
+    sql = "SELECT id, lot_number, purchase_date, created_at FROM chemical_lots"
+    params: list = []
+    if chemical_id is not None:
+        sql += " WHERE chemical_id = ?"
+        params.append(chemical_id)
+    rows = conn.execute(sql, params).fetchall()
+    changed = 0
+    for row in rows:
+        number = str(_scalar(row, "lot_number") or "")
+        if _COMPACT_LOT_RE.match(number):
+            continue
+        match = _LEGACY_LOT_RE.match(number)
+        if not match:
+            continue
+        when = _scalar(row, "purchase_date") or _scalar(row, "created_at")
+        new = compact_purchase_lot(match.group(1), match.group(2), when)
+        if new == number:
+            continue
+        conn.execute(
+            "UPDATE chemical_lots SET lot_number = ?, updated_at = datetime('now') WHERE id = ?",
+            (new, _scalar(row, "id")),
+        )
+        changed += 1
+    return changed
 
 
 def _moved_qty(conn, line_id: int) -> float:
@@ -256,19 +333,25 @@ def _apply_occ_receipt(conn, chemical_id: int, row: dict, user_id: int | None) -
     complete = occ_fully_received(row)
     delivered = delivery_at(row) or row.get("updated_at")
     purchase_date = str(delivered).replace("T", " ")[:10] if delivered else None
-    occ = row.get("occ_number") or ""
-    notes = f"Entrada {'completa' if complete else 'parcial'} OCC {occ}"
+    occ = str(row.get("occ_number") or "").strip()
+    occ_label = occ if occ.upper().startswith("OCC") else (f"OCC {occ}" if occ else "OCC")
+    notes = f"Entrada {'completa' if complete else 'parcial'} {occ_label}"
     actor = int(user_id or 1)
-    lot_no = _lot_number(row)
+    lot_no = _lot_number(row, purchase_date)
 
-    existing_lot = conn.execute(
-        """SELECT id FROM chemical_lots
-           WHERE chemical_id = ? AND lot_number = ?""",
-        (chemical_id, lot_no),
-    ).fetchone()
+    existing_lot = _existing_occ_lot(conn, chemical_id, row, lot_no)
 
     if existing_lot:
         lot_id = int(_scalar(existing_lot, "id"))
+        current_no = str(_scalar(existing_lot, "lot_number") or "")
+        if not _COMPACT_LOT_RE.match(current_no):
+            when = _scalar(existing_lot, "purchase_date") or _scalar(existing_lot, "created_at") or purchase_date
+            compact = _lot_number(row, when)
+            if compact != current_no:
+                conn.execute(
+                    "UPDATE chemical_lots SET lot_number = ?, updated_at = datetime('now') WHERE id = ?",
+                    (compact, lot_id),
+                )
         conn.execute(
             """UPDATE chemical_lots
                SET quantity_received = quantity_received + ?,
@@ -353,6 +436,7 @@ def backfill_catalog(conn, user_id: int | None = None) -> dict:
         if received:
             catalog["received"] += 1
     catalog["classified"] = reclassify_otros(conn)
+    catalog["lots_renamed"] = migrate_legacy_lot_numbers(conn)
     return catalog
 
 
