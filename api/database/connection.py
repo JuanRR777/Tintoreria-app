@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -169,6 +170,8 @@ def init_db() -> None:
         if count == 0:
             _seed(conn)
         ensure_machines_schema(conn)
+        ensure_recipes_schema(conn)
+        ensure_users_schema(conn)
 
 
 def _seed(conn: D1Connection) -> None:
@@ -178,7 +181,7 @@ def _seed(conn: D1Connection) -> None:
 
     roles = [
         (1, "admin", "Administrador", "Acceso completo al sistema", '["*"]'),
-        (2, "laboratorio", "Personal Laboratorio", "Gestion de quimicos y recetas", '["dashboard","quimicos.all","recetas.all","procesos.all","maquinas.read"]'),
+        (2, "laboratorio", "Personal Laboratorio", "Gestion de quimicos y recetas", '["dashboard","lab","quimicos.all","recetas.all","procesos.all","maquinas.read"]'),
         (3, "produccion", "Personal Produccion", "Ejecucion de procesos", '["dashboard","procesos.all","quimicos.read","recetas.read"]'),
         (4, "consulta", "Consulta", "Solo lectura y reportes", '["dashboard","reportes.all"]'),
     ]
@@ -248,6 +251,86 @@ def ensure_machines_schema(conn: Optional[D1Connection] = None) -> None:
             _apply_machines_schema(owned)
         return
     _apply_machines_schema(conn)
+
+
+def _apply_recipes_schema(conn: D1Connection) -> None:
+    names = _table_columns(conn, "recipes")
+    if "yarn_title" not in names:
+        _try_sql(conn, "ALTER TABLE recipes ADD COLUMN yarn_title TEXT")
+    if "commercial_ref" not in names:
+        _try_sql(conn, "ALTER TABLE recipes ADD COLUMN commercial_ref TEXT")
+    if "color_depth" not in names:
+        _try_sql(conn, "ALTER TABLE recipes ADD COLUMN color_depth TEXT")
+    if "process_route" not in names:
+        _try_sql(conn, "ALTER TABLE recipes ADD COLUMN process_route TEXT")
+    ing_names = _table_columns(conn, "recipe_ingredients")
+    if "dose_basis" not in ing_names:
+        _try_sql(conn, "ALTER TABLE recipe_ingredients ADD COLUMN dose_basis TEXT DEFAULT 'per_kg'")
+    step_names = _table_columns(conn, "recipe_steps")
+    if "bath_stage" not in step_names:
+        _try_sql(conn, "ALTER TABLE recipe_steps ADD COLUMN bath_stage TEXT")
+
+
+def _apply_users_schema(conn: D1Connection) -> None:
+    names = _table_columns(conn, "users")
+    if "idle_minutes" not in names:
+        _try_sql(conn, "ALTER TABLE users ADD COLUMN idle_minutes INTEGER NOT NULL DEFAULT 30")
+    if "permissions" not in names:
+        _try_sql(conn, "ALTER TABLE users ADD COLUMN permissions TEXT")
+
+
+def _grant_lab_role(conn: D1Connection) -> None:
+    row = conn.execute("SELECT id, permissions FROM roles WHERE name = 'laboratorio'").fetchone()
+    if not row:
+        return
+    try:
+        perms = json.loads(row["permissions"] or "[]")
+    except json.JSONDecodeError:
+        perms = []
+    if not isinstance(perms, list) or "*" in perms or "lab" in perms:
+        return
+    perms.append("lab")
+    conn.execute(
+        "UPDATE roles SET permissions = ?, updated_at = datetime('now') WHERE id = ?",
+        (json.dumps(perms, separators=(",", ":")), row["id"]),
+    )
+
+
+def _apply_inventory_schema(conn: D1Connection) -> None:
+    chem_names = _table_columns(conn, "chemicals")
+    if "lab_quantity" not in chem_names:
+        _try_sql(conn, "ALTER TABLE chemicals ADD COLUMN lab_quantity REAL NOT NULL DEFAULT 0")
+    lot_names = _table_columns(conn, "chemical_lots")
+    if "lab_quantity" not in lot_names:
+        _try_sql(conn, "ALTER TABLE chemical_lots ADD COLUMN lab_quantity REAL NOT NULL DEFAULT 0")
+    _grant_lab_role(conn)
+
+
+def ensure_inventory_schema(conn: Optional[D1Connection] = None) -> None:
+    """Separa el saldo de laboratorio del saldo de bodega."""
+    if conn is None:
+        with get_db() as owned:
+            _apply_inventory_schema(owned)
+        return
+    _apply_inventory_schema(conn)
+
+
+def ensure_users_schema(conn: Optional[D1Connection] = None) -> None:
+    """Agrega el tiempo de sesión por usuario si la base aún no tiene la columna."""
+    if conn is None:
+        with get_db() as owned:
+            _apply_users_schema(owned)
+        return
+    _apply_users_schema(conn)
+
+
+def ensure_recipes_schema(conn: Optional[D1Connection] = None) -> None:
+    """Agrega título, referencia comercial y base de dosis si falta la migración 0008."""
+    if conn is None:
+        with get_db() as owned:
+            _apply_recipes_schema(owned)
+        return
+    _apply_recipes_schema(conn)
 
 
 def generate_code(sequence_type: str) -> str:

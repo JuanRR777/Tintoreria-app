@@ -1,8 +1,12 @@
 import { chemicals as chemicalsApi, requests as requestsApi, stock } from '../api.js'
 import { setPageHeader } from '../layout.js'
+import { toast } from '../components/toast.js'
+import { openModal, closeModal, confirm } from '../components/modal.js'
+import { importInventoryCsv, openChemicalForm } from './chemicals.js'
+import { convertQty, entryUnits, expressLab, labUnit } from '../units.js'
 
 const TYPE_LABELS = {
-  acido: 'Acido', reactivo: 'Reactivo', directo: 'Directo', auxiliar: 'Auxiliar',
+  acido: 'Ácido', reactivo: 'Reactivo', directo: 'Directo', auxiliar: 'Auxiliar',
   mordiente: 'Mordiente', disperso: 'Disperso', vat: 'Vat',
   blanqueador: 'Blanqueador', otros: 'Otros',
 }
@@ -12,88 +16,112 @@ const TYPE_ORDER = [
   'disperso', 'vat', 'mordiente', 'otros',
 ]
 
-let currentTab = 'general'
-let generalType = ''
-let generalAll = []
-
-const PAGE_SIZE_BASE = {
-  general: 12,
-  critical: 8,
-  expiring: 8,
-  transit: 8,
-  movements: 10,
+const VIEWS = {
+  all: { qtyLabel: 'En bodega', empty: 'Sin químicos con stock en bodega' },
+  low: { qtyLabel: 'En bodega', empty: 'Sin alertas de stock bajo' },
+  expiring: { qtyLabel: 'Quedan', empty: 'Sin lotes por vencer en los próximos 30 días' },
+  waiting: { qtyLabel: 'Solicitado', empty: 'Sin solicitudes en espera' },
+  ordered: { qtyLabel: 'Entrado / pedido', empty: 'Sin órdenes de compra abiertas' },
+  lab: { qtyLabel: 'En laboratorio', empty: 'Sin químicos en el inventario de laboratorio' },
 }
 
-/** Tamaño efectivo por pestaña (se recalcula al pintar y al redimensionar). */
-const PAGE_SIZE = { ...PAGE_SIZE_BASE }
+const MOVE_TABS = [
+  { id: 'all', label: 'Todos' },
+  { id: 'in', label: 'Entradas' },
+  { id: 'out', label: 'Salidas' },
+  { id: 'adjustment', label: 'Ajustes' },
+]
 
-const VIEWPORT_PAGE = {
-  mini: { minCell: 128, gap: 8, rowHeight: 92, bottomMargin: 48, min: 4, max: 200 },
-  chem: { minCell: 168, gap: 10, rowHeight: 175, bottomMargin: 72, min: 6, max: 200 },
-  list: { rowHeight: 68, bottomMargin: 48, min: 5, max: 100 },
-}
+const ROW_H = 44
+const GROUP_H = 30
+const MOVE_ROW_H = 48
+const MOVE_GROUP_H = 46
 
-let viewportPageTimer = null
+const ICON_ALERT = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636-2.87l-8.106-13.536a1.914 1.914 0 0 0-3.274 0z"/><path d="M12 16h.01"/></svg>'
+const ICON_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>'
 
-const pages = {
-  general: 1,
-  critical: 1,
-  expiring: 1,
-  transit: 1,
-  movements: 1,
-}
-
-const cache = {
-  general: [],
-  critical: [],
-  expiring: [],
-  transit: [],
+const state = {
+  view: 'all',
+  type: '',
+  query: '',
+  page: 1,
+  moveTab: 'all',
+  movePage: 1,
+  summary: null,
+  chemicals: [],
   movements: [],
+  tablePages: [],
+  movePages: [],
+  selectedId: null,
 }
 
-const ICON = {
-  alert: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636-2.87l-8.106-13.536a1.914 1.914 0 0 0-3.274 0z"/><path d="M12 16h.01"/></svg>`,
-  clock: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.986 12.51a9 9 0 1 0-8.476 8.48"/><path d="M12 7v5l3 3"/><path d="M19 16v3"/><path d="M19 22v.01"/></svg>`,
-  truck: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17a2 2 0 1 0 4 0 2 2 0 1 0-4 0"/><path d="M17 17a2 2 0 1 0 4 0 2 2 0 1 0-4 0"/><path d="M5 17H3v-4M2 5h11v12m-4 0h6m4 0h2v-6h-8M13 5h5l3 5"/><path d="M3 9h4"/></svg>`,
-  flask: `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6"/><path d="M10 9h4"/><path d="M9 3v7l-5.5 9.5A1.65 1.65 0 0 0 5.9 22h12.2a1.65 1.65 0 0 0 1.4-2.5L15 10V3"/></svg>`,
-  warehouse: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13"/><path d="M13 13h4v8h-4z"/><path d="M7 13h4v8H7z"/></svg>`,
-  wait: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4h12"/><path d="M6 20h12"/><path d="M8 4c0 5 8 6 8 12"/><path d="M16 20c0-5-8-6-8-12"/></svg>`,
-}
-
-const CHEM_ART = {
-  acido: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M18 8h12v7l8 15.5A6 6 0 0 1 32.7 40H15.3A6 6 0 0 1 10 30.5L18 15V8z" fill="currentColor" opacity=".16"/><path d="M18 8h12M20 15h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 8v7l-8 15.5A6 6 0 0 0 15.3 40h17.4A6 6 0 0 0 38 30.5L30 15V8" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="21" cy="29" r="1.4" fill="currentColor" opacity=".55"/><circle cx="28" cy="33" r="1.1" fill="currentColor" opacity=".4"/></svg>`,
-  reactivo: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M14 12h20v20a8 8 0 0 1-8 8h-4a8 8 0 0 1-8-8V12z" fill="currentColor" opacity=".16"/><path d="M14 12h20" stroke="currentColor" stroke-width="2" fill="none"/><path d="M16 12v18a8 8 0 0 0 8 8 8 8 0 0 0 8-8V12" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 26h16" stroke="currentColor" stroke-width="2" opacity=".35"/><path d="M22 8h4v4h-4z" fill="currentColor" opacity=".5"/></svg>`,
-  directo: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M20 8h8v8l6 6v16a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V22l6-6V8z" fill="currentColor" opacity=".16"/><path d="M20 8h8v8l6 6v16a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V22l6-6V8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 24h16" stroke="currentColor" stroke-width="2" opacity=".35"/><circle cx="24" cy="34" r="3" fill="currentColor" opacity=".45"/></svg>`,
-  auxiliar: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M18 10h12v6l4 4v18a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V20l4-4v-6z" fill="currentColor" opacity=".16"/><path d="M18 10h12v6l4 4v18a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4V20l4-4v-6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M21 10V7h6v3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 26c3 3 13 3 16 0" fill="none" stroke="currentColor" stroke-width="2" opacity=".4"/></svg>`,
-  mordiente: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M16 14h4v10l-7 14h22l-7-14V14h4" fill="currentColor" opacity=".14"/><path d="M16 14h4v10l-7 14h22l-7-14V14h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M20 8h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="24" cy="32" r="2" fill="currentColor" opacity=".5"/></svg>`,
-  disperso: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M24 8c6 8 12 14 12 22a12 12 0 0 1-24 0c0-8 6-14 12-22z" fill="currentColor" opacity=".16"/><path d="M24 8c6 8 12 14 12 22a12 12 0 0 1-24 0c0-8 6-14 12-22z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="20" cy="28" r="1.4" fill="currentColor" opacity=".5"/><circle cx="27" cy="32" r="1.8" fill="currentColor" opacity=".4"/><circle cx="24" cy="22" r="1.1" fill="currentColor" opacity=".45"/></svg>`,
-  vat: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M10 18h28v16a8 8 0 0 1-8 8H18a8 8 0 0 1-8-8V18z" fill="currentColor" opacity=".16"/><path d="M10 18h28v16a8 8 0 0 1-8 8H18a8 8 0 0 1-8-8V18z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M14 18V12h20v6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 26h24" stroke="currentColor" stroke-width="2" opacity=".35"/></svg>`,
-  blanqueador: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M19 12h10l3 6v18a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V18l3-6z" fill="currentColor" opacity=".16"/><path d="M19 12h10l3 6v18a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V18l3-6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M32 10l2-3M36 14l3-1M31 16l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 24h12" stroke="currentColor" stroke-width="2" opacity=".35"/></svg>`,
-  otros: `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M18 8h12v8l8 16a6 6 0 0 1-5.2 9H15.2A6 6 0 0 1 10 32l8-16V8z" fill="currentColor" opacity=".16"/><path d="M18 8h12M20 16h8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M18 8v8l-8 16a6 6 0 0 0 5.2 9h17.6A6 6 0 0 0 38 32l-8-16V8" fill="none" stroke="currentColor" stroke-width="2"/></svg>`,
-}
+let resizeTimer = null
+let onResize = null
 
 export async function showView(container) {
   setPageHeader({
-    title: 'Stock',
-    subtitle: 'Estado de inventario, alertas y movimientos de quimicos',
+    title: 'Inventario',
+    subtitle: 'Catálogo, stock, lotes y movimientos en un solo lugar',
+    actionsHtml: `
+      <input type="file" id="file-inv" accept=".csv,text/csv" hidden>
+      <button class="btn btn-secondary" id="btn-new-chem">Nuevo químico</button>
+      <button class="btn btn-primary" id="btn-import-inv">Cargar inventario</button>`,
   })
   container.innerHTML = `
     <div id="stock-content"><div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div></div>
   `
+  const fileInv = document.getElementById('file-inv')
+  document.getElementById('btn-import-inv').onclick = () => fileInv.click()
+  document.getElementById('btn-new-chem').onclick = () => openChemicalForm(null, () => loadStock())
+  fileInv.onchange = async () => {
+    await importInventoryCsv(fileInv)
+    await loadStock()
+  }
+
+  onResize = () => {
+    clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => {
+      fitPage()
+      paintTable()
+      paintMoves()
+    }, 120)
+  }
+  window.addEventListener('resize', onResize)
+
   await loadStock()
+  return () => {
+    window.removeEventListener('resize', onResize)
+    clearTimeout(resizeTimer)
+    closeChemDrawer()
+  }
 }
 
-async function loadStock() {
+async function loadStock({ keepPage = false } = {}) {
   const container = document.getElementById('stock-content')
   if (!container) return
   try {
-    const summary = await stock.summary({ fresh: true })
+    const [summary, chems, moves] = await Promise.all([
+      stock.summary({ fresh: true }),
+      chemicalsApi.list({}, { fresh: true }),
+      stock.movements({ limit: 500 }).catch(() => []),
+    ])
     summary.pending_purchase = await withOccNumbers(summary.pending_purchase || [])
-    renderStock(summary, container)
+    state.summary = summary
+    state.chemicals = Array.isArray(chems) ? chems : []
+    state.movements = Array.isArray(moves) ? moves : []
+    if (!keepPage) {
+      state.page = 1
+      state.movePage = 1
+    }
+    renderShell(container)
   } catch (err) {
     container.innerHTML = `<div class="empty-state"><p>${esc(err.message)}</p></div>`
   }
 }
+
+// ---------------------------------------------------------------------------
+// Datos
+// ---------------------------------------------------------------------------
 
 function itemKey(value) {
   const raw = String(value || '').trim()
@@ -104,12 +132,6 @@ function itemKey(value) {
 function occSortValue(value) {
   const digits = String(value || '').replace(/\D/g, '')
   return digits ? Number(digits) : Number.POSITIVE_INFINITY
-}
-
-function byOccNumber(a, b) {
-  const diff = occSortValue(a.occ_number) - occSortValue(b.occ_number)
-  if (diff) return diff
-  return String(a.name || '').localeCompare(String(b.name || ''), 'es', { sensitivity: 'base' })
 }
 
 function isWaiting(c) {
@@ -180,329 +202,6 @@ async function withOccNumbers(items) {
   }
 }
 
-function renderStock(s, container) {
-  const low = s.low_stock_chemicals || []
-  const expiring = s.expiring_lots_30d || []
-  const pending = s.pending_purchase || []
-  const waiting = pending.filter(isWaiting)
-  const ordered = pending.filter((c) => !isWaiting(c)).sort(byOccNumber)
-  const availableCount = Math.max(0, (s.chemicals_total ?? s.total_chemicals ?? 0) - (s.waiting_count ?? 0) - (s.ordered_count ?? 0))
-
-  container.innerHTML = `
-    <div class="stats-grid" style="margin-bottom:16px">
-      <div class="stat-card is-clickable" data-tab="general">
-        <div class="stat-icon blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg></div>
-        <div class="stat-info">
-          <div class="stat-label">Total quimicos</div>
-          <div class="stat-value">${s.chemicals_total ?? s.total_chemicals ?? 0}</div>
-        </div>
-      </div>
-      <div class="stat-card is-clickable" data-tab="critical">
-        <div class="stat-icon ${(s.low_stock_count ?? 0) > 0 ? 'red' : 'green'}">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/></svg>
-        </div>
-        <div class="stat-info">
-          <div class="stat-label">Alertas stock bajo</div>
-          <div class="stat-value">${s.low_stock_count ?? 0}</div>
-        </div>
-      </div>
-      <div class="stat-card is-clickable" data-tab="expiring">
-        <div class="stat-icon ${(s.expiring_soon_count ?? 0) > 0 ? 'amber' : 'green'}">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        </div>
-        <div class="stat-info">
-          <div class="stat-label">Lotes por vencer (30d)</div>
-          <div class="stat-value">${s.expiring_soon_count ?? 0}</div>
-        </div>
-      </div>
-      <div class="stat-card is-clickable" data-tab="transit">
-        <div class="stat-icon ${(s.waiting_count ?? 0) > 0 ? 'amber' : 'blue'}">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        </div>
-        <div class="stat-info">
-          <div class="stat-label">En espera (SOC)</div>
-          <div class="stat-value">${s.waiting_count ?? 0}</div>
-        </div>
-      </div>
-      <div class="stat-card is-clickable" data-tab="transit">
-        <div class="stat-icon ${(s.ordered_count ?? 0) > 0 ? 'blue' : 'green'}">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        </div>
-        <div class="stat-info">
-          <div class="stat-label">Pedido (OCC)</div>
-          <div class="stat-value">${s.ordered_count ?? 0}</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="inv-tabs" role="tablist">
-      ${tabButton('general', 'Inventario general', availableCount)}
-      ${tabButton('critical', 'Stock crítico', low.length)}
-      ${tabButton('expiring', 'Por vencer', expiring.length)}
-      ${tabButton('transit', 'En tránsito', pending.length)}
-    </div>
-
-    <div class="inv-panel" data-panel="general" ${panelHidden('general')}>
-      <div class="inv-layout">
-        <section class="inv-board is-success">
-          <header class="inv-board-head">
-            <div class="inv-board-icon">${ICON.warehouse}</div>
-            <div class="inv-board-copy">
-              <h3>Disponible en bodega</h3>
-              <p>Inventario real con entrada</p>
-            </div>
-            <span class="inv-board-count" id="inv-available-count">${availableCount}</span>
-          </header>
-          <div class="inv-board-toolbar">
-            <div class="search-box">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <input type="text" id="inv-general-search" placeholder="Buscar por nombre, codigo o proveedor...">
-            </div>
-            <div class="inv-type-filters" id="inv-type-filters"></div>
-          </div>
-          <div id="inv-general-list"><div class="loading-state"><div class="spinner"></div><span>Cargando inventario...</span></div></div>
-          <div id="inv-general-pager" class="inv-board-pager"></div>
-        </section>
-        <aside class="inv-side">
-          <header class="inv-side-head">
-            <h3>Movimientos</h3>
-            <p>Entradas, salidas y ajustes de bodega</p>
-          </header>
-          <div id="movements-list" class="inv-side-body">
-            <div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div>
-          </div>
-          <div id="inv-movements-pager" class="inv-side-pager"></div>
-        </aside>
-      </div>
-    </div>
-
-    <div class="inv-panel" data-panel="critical" ${panelHidden('critical')}>
-      ${board({
-        theme: 'danger',
-        icon: ICON.alert,
-        title: 'Stock crítico',
-        subtitle: 'Requiere reposición inmediata',
-        count: low.length,
-        body: '<div id="inv-critical-list"></div><div id="inv-critical-pager" class="inv-board-pager"></div>',
-      })}
-    </div>
-
-    <div class="inv-panel" data-panel="expiring" ${panelHidden('expiring')}>
-      ${board({
-        theme: 'warning',
-        icon: ICON.clock,
-        title: 'Por vencer',
-        subtitle: 'Próximos 30 días',
-        count: expiring.length,
-        body: '<div id="inv-expiring-list"></div><div id="inv-expiring-pager" class="inv-board-pager"></div>',
-      })}
-    </div>
-
-    <div class="inv-panel" data-panel="transit" ${panelHidden('transit')}>
-      ${board({
-        theme: 'accent',
-        icon: ICON.truck,
-        title: 'En tránsito',
-        subtitle: 'Aún falta completar entrada a bodega',
-        count: pending.length,
-        body: '<div id="inv-transit-list"></div><div id="inv-transit-pager" class="inv-board-pager"></div>',
-      })}
-    </div>
-  `
-
-  cache.critical = low
-  cache.expiring = expiring
-  cache.transit = [...waiting, ...ordered]
-  pages.critical = 1
-  pages.expiring = 1
-  pages.transit = 1
-
-  bindTabs(container)
-  bindStockClicks(container)
-  bindGeneralSearch()
-  paintMini('critical', miniLowStock, 'Sin alertas de stock bajo')
-  paintMini('expiring', miniExpiring, 'Sin lotes por vencer')
-  paintTransit()
-  loadGeneralList()
-  loadMovements()
-  bindStockViewportPaging()
-}
-
-function tabButton(id, label, count) {
-  const active = currentTab === id
-  return `
-    <button type="button" class="inv-tab ${active ? 'is-active' : ''} is-${id}" data-tab="${id}" role="tab" aria-selected="${active ? 'true' : 'false'}">
-      ${esc(label)}
-      <span class="inv-tab-count">${count}</span>
-    </button>`
-}
-
-function panelHidden(id) {
-  return currentTab === id ? '' : 'hidden'
-}
-
-function bindTabs(container) {
-  container.querySelectorAll('[data-tab]').forEach((btn) => {
-    btn.onclick = () => setTab(container, btn.dataset.tab)
-  })
-}
-
-function setTab(container, tab) {
-  currentTab = tab
-  container.querySelectorAll('.inv-tab[data-tab], .stat-card[data-tab]').forEach((btn) => {
-    if (btn.classList.contains('inv-tab')) {
-      const on = btn.dataset.tab === tab
-      btn.classList.toggle('is-active', on)
-      btn.setAttribute('aria-selected', on ? 'true' : 'false')
-    }
-  })
-  container.querySelectorAll('[data-panel]').forEach((panel) => {
-    panel.hidden = panel.dataset.panel !== tab
-  })
-}
-
-function bindStockViewportPaging() {
-  if (window.__stockViewportPagingBound) return
-  window.__stockViewportPagingBound = true
-  window.addEventListener('resize', () => scheduleViewportPageRefresh())
-}
-
-function scheduleViewportPageRefresh() {
-  clearTimeout(viewportPageTimer)
-  viewportPageTimer = setTimeout(refreshViewportPageSizes, 120)
-}
-
-function availableHeightFromTop(topPx, bottomMargin) {
-  return Math.max(0, window.innerHeight - topPx - bottomMargin)
-}
-
-function gridFitCount(width, available, opts) {
-  if (available < opts.rowHeight * 0.75) return opts.min
-  const cols = Math.max(1, Math.floor((width + opts.gap) / (opts.minCell + opts.gap)))
-  const rows = Math.max(1, Math.floor(available / opts.rowHeight))
-  return Math.max(opts.min, Math.min(opts.max, cols * rows))
-}
-
-/** Cuántos ítems caben en la ventana (sin scroll interno). */
-function countViewportFit(key) {
-  let top = 0
-  let width = 800
-  let mode = 'mini'
-
-  if (key === 'general') {
-    mode = 'chem'
-    const toolbar = document.querySelector('[data-panel="general"]:not([hidden]) .inv-board-toolbar')
-    const list = document.getElementById('inv-general-list')
-    const anchor = toolbar || list
-    if (!anchor) return PAGE_SIZE_BASE[key]
-    top = anchor.getBoundingClientRect().bottom
-    width = list?.clientWidth || anchor.clientWidth || width
-  } else if (key === 'movements') {
-    mode = 'list'
-    const head = document.querySelector('.inv-side-head')
-    const list = document.getElementById('movements-list')
-    const anchor = head || list
-    if (!anchor) return PAGE_SIZE_BASE[key]
-    top = anchor.getBoundingClientRect().bottom
-    width = list?.clientWidth || 320
-  } else {
-    const head = document.querySelector(`[data-panel="${key}"]:not([hidden]) .inv-board-head`)
-    const list = document.getElementById(`inv-${key}-list`)
-    const anchor = head || list
-    if (!anchor) return PAGE_SIZE_BASE[key]
-    top = anchor.getBoundingClientRect().bottom
-    width = list?.clientWidth || anchor.clientWidth || width
-  }
-
-  const opts = mode === 'chem' ? VIEWPORT_PAGE.chem : mode === 'list' ? VIEWPORT_PAGE.list : VIEWPORT_PAGE.mini
-  const available = availableHeightFromTop(top, opts.bottomMargin)
-  if (mode === 'list') {
-    return Math.max(opts.min, Math.min(opts.max, Math.floor(available / opts.rowHeight) || opts.min))
-  }
-  return gridFitCount(width, available, opts)
-}
-
-/**
- * Si todo cabe en pantalla → una página (sin paginador).
- * Si no cabe → tamaño fijo por pestaña (paginación clásica, reemplaza contenido).
- */
-function resolvePageSize(key) {
-  const total = (cache[key] || []).length
-  if (!total) return PAGE_SIZE_BASE[key]
-  const fit = countViewportFit(key)
-  if (total <= fit) return total
-  return PAGE_SIZE_BASE[key]
-}
-
-function refreshViewportPageSizes() {
-  // Inventario general: paginación fija (evita mezclar páginas al recalcular alto).
-  const keys =
-    currentTab === 'general'
-      ? ['movements']
-      : currentTab === 'transit'
-        ? ['transit']
-        : [currentTab]
-
-  let changed = false
-  for (const key of keys) {
-    const next = resolvePageSize(key)
-    if (next === PAGE_SIZE[key]) continue
-    PAGE_SIZE[key] = next
-    const total = (cache[key] || []).length
-    const totalPages = Math.max(1, Math.ceil(total / next))
-    if ((pages[key] || 1) > totalPages) pages[key] = totalPages
-    changed = true
-  }
-
-  if (!changed) return
-  if (currentTab === 'general') {
-    renderGeneralCards()
-    paintMovements()
-  } else {
-    paintKey(currentTab)
-  }
-}
-
-function scrollStockListIntoView(anchorEl) {
-  const main = document.querySelector('.main-content')
-  if (!main || !anchorEl) return
-  const mainTop = main.getBoundingClientRect().top
-  const elTop = anchorEl.getBoundingClientRect().top
-  main.scrollTop += elTop - mainTop - 12
-}
-
-function bindGeneralSearch() {
-  const search = document.getElementById('inv-general-search')
-  if (!search) return
-  let debounce
-  search.oninput = () => {
-    clearTimeout(debounce)
-    debounce = setTimeout(loadGeneralList, 200)
-  }
-}
-
-async function loadGeneralList() {
-  const list = document.getElementById('inv-general-list')
-  if (!list) return
-  const query = (document.getElementById('inv-general-search')?.value || '').trim()
-  try {
-    const items = await chemicalsApi.list({ search: query || undefined }, { fresh: true })
-    generalAll = items
-      .filter((c) => chemKind(c) === 'disponible')
-      .sort((a, b) => byTypeThenName(a, b))
-    if (!query) {
-      const countEl = document.querySelector('.inv-tab[data-tab="general"] .inv-tab-count')
-      const boardCount = document.getElementById('inv-available-count')
-      if (countEl) countEl.textContent = generalAll.length
-      if (boardCount) boardCount.textContent = generalAll.length
-    }
-    paintTypeFilters()
-    applyGeneralFilter()
-  } catch (err) {
-    list.innerHTML = `<div class="empty-state"><p>${esc(err.message)}</p></div>`
-  }
-}
-
 function chemTypeOf(c) {
   return c.chemical_type || 'otros'
 }
@@ -513,420 +212,924 @@ function typeRank(type) {
 }
 
 function byTypeThenName(a, b) {
-  const rank = typeRank(chemTypeOf(a)) - typeRank(chemTypeOf(b))
+  const rank = typeRank(a.type) - typeRank(b.type)
   if (rank) return rank
   return String(a.name || '').localeCompare(String(b.name || ''), 'es', { sensitivity: 'base' })
 }
 
-function paintTypeFilters() {
-  const el = document.getElementById('inv-type-filters')
-  if (!el) return
-  const counts = new Map()
-  for (const c of generalAll) {
-    const type = chemTypeOf(c)
-    counts.set(type, (counts.get(type) || 0) + 1)
+function chemStatus(c) {
+  const stock = Number(c.stock_quantity || 0)
+  const min = Number(c.min_stock_alert || 0)
+  const pending = Number(c.pending_qty || 0)
+  const unit = c.unit || 'kg'
+  if (stock <= min && (min > 0 || stock <= 0)) return { tone: 'danger', label: 'Stock bajo' }
+  if (pending > 0) return { tone: 'warning', label: `Parcial · faltan ${fmtQty(pending)} ${unit}` }
+  return { tone: 'success', label: 'Disponible' }
+}
+
+function inStock(c) {
+  const status = c.procurement_status || 'disponible'
+  return status === 'disponible' || Number(c.stock_quantity || 0) > 0
+}
+
+function chemExtras(id) {
+  const c = state.chemicals.find((x) => Number(x.id) === Number(id))
+  return {
+    id,
+    lots: c ? Number(c.active_lot_count || 0) : null,
+    supplier: c?.supplier || '',
+    lotNo: c?.current_lot_number || '',
+    min: c ? Number(c.min_stock_alert || 0) : 0,
   }
-  if (generalType && !counts.has(generalType)) generalType = ''
-  const chips = [
-    `<button type="button" class="inv-type-chip is-all${generalType === '' ? ' is-active' : ''}" data-inv-type=""><span class="inv-type-dot"></span>Todos <strong>${generalAll.length}</strong></button>`,
+}
+
+function rowsForView() {
+  const s = state.summary || {}
+  const pending = s.pending_purchase || []
+  if (state.view === 'low') {
+    return (s.low_stock_chemicals || []).map((c) => ({
+      ...chemExtras(c.id),
+      code: c.code, name: c.name, type: chemTypeOf(c),
+      qty: c.stock_quantity, unit: c.unit,
+      status: Number(c.min_stock_alert) > 0
+        ? { tone: 'danger', label: 'Stock bajo' }
+        : { tone: 'danger', label: 'Sin stock' },
+    }))
+  }
+  if (state.view === 'expiring') {
+    return (s.expiring_lots_30d || []).map((l) => {
+      const days = daysUntil(l.expiry_date)
+      const label = days == null ? 'Por vencer'
+        : days < 0 ? 'Vencido'
+          : days === 0 ? 'Vence hoy'
+            : `Vence en ${days} ${days === 1 ? 'día' : 'días'} · ${formatDay(l.expiry_date)}`
+      return {
+        ...chemExtras(l.chemical_id),
+        code: l.chemical_code, name: l.chemical_name, sub: l.lot_number ? `Lote ${l.lot_number}` : '',
+        type: '', qty: l.quantity_remaining, unit: l.unit, min: 0,
+        status: { tone: days != null && days <= 7 ? 'danger' : 'warning', label },
+      }
+    })
+  }
+  if (state.view === 'waiting') {
+    return pending.filter(isWaiting).map((c) => ({
+      ...chemExtras(c.id),
+      code: c.code, name: c.name, type: chemTypeOf(c),
+      qty: c.pending_qty, unit: c.unit, min: 0,
+      status: { tone: 'warning', label: 'En espera · SOC' },
+    }))
+  }
+  if (state.view === 'lab') {
+    return state.chemicals.filter((c) => Number(c.lab_quantity || 0) > 0).map((c) => {
+      const shown = expressLab(c.lab_quantity, c.unit)
+      return {
+        ...chemExtras(c.id),
+        code: c.code, name: c.name, type: chemTypeOf(c),
+        qty: shown.qty, unit: shown.unit, min: 0,
+        status: { tone: 'accent', label: 'En laboratorio' },
+      }
+    })
+  }
+  if (state.view === 'ordered') {
+    return pending.filter((c) => !isWaiting(c))
+      .sort((a, b) => occSortValue(a.occ_number) - occSortValue(b.occ_number))
+      .map((c) => {
+        const ordered = Number(c.qty_ordered) || 0
+        const entered = Number(c.qty_entered) || 0
+        const falta = ordered > 0 ? Math.max(0, ordered - entered) : Number(c.qty_pending ?? c.pending_qty) || 0
+        const occ = String(c.occ_number || '').trim()
+        const extra = Number(c.occ_count) > 1 ? ` +${Number(c.occ_count) - 1}` : ''
+        return {
+          ...chemExtras(c.id),
+          code: c.code, name: c.name, type: chemTypeOf(c),
+          qtyText: ordered > 0 ? `${fmtQty(entered)} / ${fmtQty(ordered)}` : fmtQty(falta),
+          unit: c.unit, min: 0,
+          status: entered > 0
+            ? { tone: 'warning', label: `Parcial · faltan ${fmtQty(falta)} ${c.unit || 'kg'}` }
+            : { tone: 'accent', label: occ ? `Pedido · ${occ}${extra}` : 'Pedido' },
+        }
+      })
+  }
+  return state.chemicals.filter(inStock).map((c) => ({
+    ...chemExtras(c.id),
+    code: c.code, name: c.name, type: chemTypeOf(c),
+    qty: c.stock_quantity, unit: c.unit,
+    status: chemStatus(c),
+  }))
+}
+
+function matchesQuery(r) {
+  const q = state.query.trim().toLowerCase()
+  if (!q) return true
+  return [r.code, r.name, r.sub, r.supplier, r.lotNo].some((v) => String(v || '').toLowerCase().includes(q))
+}
+
+function filteredRows() {
+  return rowsForView().filter(matchesQuery).sort(byTypeThenName)
+}
+
+// ---------------------------------------------------------------------------
+// Estructura
+// ---------------------------------------------------------------------------
+
+function renderShell(container) {
+  const s = state.summary || {}
+  const inStockCount = state.chemicals.filter((c) => Number(c.stock_quantity || 0) > 0).length
+  const labCount = state.chemicals.filter((c) => Number(c.lab_quantity || 0) > 0).length
+  const low = s.low_stock_count ?? (s.low_stock_chemicals || []).length
+  const expiring = (s.expiring_lots_30d || []).length
+  const waiting = (s.pending_purchase || []).filter(isWaiting).length
+  const ordered = (s.pending_purchase || []).filter((c) => !isWaiting(c)).length
+  const kpis = [
+    { id: 'all', label: 'Total químicos', value: s.total_chemicals ?? state.chemicals.length, sub: `${inStockCount} con stock en bodega` },
+    { id: 'lab', label: 'Laboratorio', value: labCount, sub: 'Saldo aparte de bodega' },
+    { id: 'low', label: 'Stock bajo', value: low, sub: 'Por debajo del mínimo', alert: low > 0 },
+    { id: 'expiring', label: 'Lotes por vencer', value: expiring, sub: 'Próximos 30 días' },
+    { id: 'waiting', label: 'En espera', value: waiting, sub: 'Solicitudes (SOC)' },
+    { id: 'ordered', label: 'Pedidos', value: ordered, sub: 'Órdenes de compra (OCC)' },
   ]
-  for (const key of TYPE_ORDER) {
-    const n = counts.get(key)
-    if (!n) continue
-    chips.push(
-      `<button type="button" class="inv-type-chip is-${esc(key)}${generalType === key ? ' is-active' : ''}" data-inv-type="${esc(key)}"><span class="inv-type-dot"></span>${esc(TYPE_LABELS[key] || key)} <strong>${n}</strong></button>`
-    )
+
+  container.innerHTML = `
+    <div class="sk-page" id="sk-page">
+      <div class="sk-kpis">
+        ${kpis.map((k) => `
+          <button type="button" class="sk-kpi ${k.alert ? 'is-alert' : ''} ${state.view === k.id ? 'is-active' : ''}" data-sk-view="${k.id}">
+            <span class="sk-kpi-label">${k.alert ? ICON_ALERT : ''}${esc(k.label)}</span>
+            <strong>${esc(k.value)}</strong>
+            <span class="sk-kpi-sub">${esc(k.sub)}</span>
+          </button>`).join('')}
+      </div>
+      <div class="sk-main">
+        <section class="sk-card sk-table">
+          <div class="sk-toolbar">
+            <label class="sk-search">
+              ${ICON_SEARCH}
+              <input type="text" id="sk-search" placeholder="Buscar por nombre, código, lote o proveedor" value="${esc(state.query)}">
+            </label>
+            <div class="sk-seg" id="sk-types"></div>
+          </div>
+          <div class="sk-thead">
+            <span>Código</span>
+            <span>Producto ↑</span>
+            <span class="is-num">Lotes</span>
+            <span class="is-num" id="sk-qty-label">${esc(VIEWS[state.view].qtyLabel)}</span>
+            <span>Estado</span>
+          </div>
+          <div class="sk-tbody" id="sk-tbody"></div>
+          <div class="sk-tfoot">
+            <span id="sk-range"></span>
+            <nav class="sk-pager" id="sk-pager" aria-label="Paginación"></nav>
+          </div>
+        </section>
+        <aside class="sk-card sk-moves">
+          <header class="sk-moves-head">
+            <h3>Movimientos</h3>
+            <p>Entradas, salidas y ajustes de bodega</p>
+          </header>
+          <div class="sk-seg sk-seg-full" id="sk-move-tabs">
+            ${MOVE_TABS.map((t) => `<button type="button" data-sk-move="${t.id}" class="${state.moveTab === t.id ? 'is-active' : ''}">${t.label}</button>`).join('')}
+          </div>
+          <div class="sk-moves-body" id="sk-moves-body"></div>
+          <div class="sk-moves-foot">
+            <span id="sk-move-range"></span>
+            <nav class="sk-pager" id="sk-move-pager" aria-label="Paginación de movimientos"></nav>
+          </div>
+        </aside>
+      </div>
+    </div>`
+
+  container.querySelectorAll('[data-sk-view]').forEach((btn) => {
+    btn.onclick = () => {
+      state.view = btn.dataset.skView
+      state.type = ''
+      state.page = 1
+      container.querySelectorAll('[data-sk-view]').forEach((b) => b.classList.toggle('is-active', b === btn))
+      const label = document.getElementById('sk-qty-label')
+      if (label) label.textContent = VIEWS[state.view].qtyLabel
+      paintTable()
+    }
+  })
+  let debounce
+  document.getElementById('sk-search').oninput = (e) => {
+    clearTimeout(debounce)
+    debounce = setTimeout(() => {
+      state.query = e.target.value
+      state.page = 1
+      paintTable()
+    }, 200)
   }
-  el.innerHTML = `<span class="inv-type-label">Tipo</span>${chips.join('')}`
+  container.querySelectorAll('[data-sk-move]').forEach((btn) => {
+    btn.onclick = () => {
+      state.moveTab = btn.dataset.skMove
+      state.movePage = 1
+      container.querySelectorAll('[data-sk-move]').forEach((b) => b.classList.toggle('is-active', b === btn))
+      paintMoves()
+    }
+  })
+
+  fitPage()
+  paintTable()
+  paintMoves()
 }
 
-function applyGeneralFilter() {
-  const filtered = generalType
-    ? generalAll.filter((c) => chemTypeOf(c) === generalType)
-    : generalAll
-  cache.general = filtered
-  pages.general = 1
-  renderGeneralCards()
+function fitPage() {
+  const page = document.getElementById('sk-page')
+  if (!page) return
+  const top = page.getBoundingClientRect().top
+  page.style.height = `${Math.max(420, window.innerHeight - top - 28)}px`
 }
 
-function chemKind(c) {
-  if (c.procurement_status === 'espera') return 'espera'
-  if (c.procurement_status === 'pedido') return 'pedido'
-  return 'disponible'
+// ---------------------------------------------------------------------------
+// Tabla
+// ---------------------------------------------------------------------------
+
+function paginate(entries, capacity, groupH, rowH, groupKey) {
+  const pages = []
+  let current = []
+  let used = 0
+  let lastGroup = null
+  for (const entry of entries) {
+    const key = groupKey(entry)
+    const needsHeader = key != null && (key !== lastGroup || !current.length)
+    const cost = rowH + (needsHeader ? groupH : 0)
+    if (current.length && used + cost > capacity) {
+      pages.push(current)
+      current = []
+      used = 0
+    }
+    const header = key != null && (key !== lastGroup || !current.length)
+    current.push({ entry, header })
+    used += rowH + (header ? groupH : 0)
+    lastGroup = key
+  }
+  if (current.length) pages.push(current)
+  return pages
 }
 
-function scrubOrphanStockNodes(boardSelector, listId) {
-  const board = document.querySelector(boardSelector)
-  const list = document.getElementById(listId)
-  if (!board || !list) return
-  board.querySelectorAll('.inv-type-band, .inv-chem-grid, .inv-pager, .inv-mini-grid').forEach((el) => {
-    if (!list.contains(el)) el.remove()
+function paintTypes(rows) {
+  const host = document.getElementById('sk-types')
+  if (!host) return
+  const base = rowsForView().filter(matchesQuery)
+  const counts = new Map()
+  for (const r of base) if (r.type) counts.set(r.type, (counts.get(r.type) || 0) + 1)
+  if (state.type && !counts.has(state.type)) state.type = ''
+  const types = TYPE_ORDER.filter((t) => counts.has(t))
+  host.hidden = !types.length
+  host.innerHTML = [
+    `<button type="button" data-sk-type="" class="${state.type === '' ? 'is-active' : ''}">Todos <b>${base.length}</b></button>`,
+    ...types.map((t) => `<button type="button" data-sk-type="${t}" class="${state.type === t ? 'is-active' : ''}">${esc(TYPE_LABELS[t] || t)} <b>${counts.get(t)}</b></button>`),
+  ].join('')
+  host.querySelectorAll('[data-sk-type]').forEach((btn) => {
+    btn.onclick = () => {
+      state.type = btn.dataset.skType
+      state.page = 1
+      paintTable()
+    }
+  })
+  return rows
+}
+
+function paintTable() {
+  const body = document.getElementById('sk-tbody')
+  if (!body) return
+  const all = filteredRows()
+  paintTypes(all)
+  const rows = state.type ? all.filter((r) => r.type === state.type) : all
+  const groupKey = (r) => (r.type ? r.type : null)
+  const capacity = Math.max(ROW_H * 3, body.clientHeight)
+  const pages = paginate(rows, capacity, GROUP_H, ROW_H, groupKey)
+  state.tablePages = pages
+  const totalPages = Math.max(1, pages.length)
+  if (state.page > totalPages) state.page = totalPages
+  if (state.page < 1) state.page = 1
+
+  const range = document.getElementById('sk-range')
+  const pager = document.getElementById('sk-pager')
+  if (!rows.length) {
+    body.innerHTML = `<p class="sk-empty">${esc(VIEWS[state.view].empty)}</p>`
+    if (range) range.textContent = '0 químicos'
+    if (pager) pager.innerHTML = ''
+    return
+  }
+
+  const pageIdx = state.page - 1
+  const current = pages[pageIdx] || []
+  const typeTotal = new Map()
+  for (const r of rows) if (r.type) typeTotal.set(r.type, (typeTotal.get(r.type) || 0) + 1)
+  const typePages = new Map()
+  pages.forEach((p, i) => p.forEach(({ entry }) => {
+    if (!entry.type) return
+    const set = typePages.get(entry.type) || []
+    if (!set.includes(i)) set.push(i)
+    typePages.set(entry.type, set)
+  }))
+
+  body.innerHTML = current.map(({ entry: r, header }) => {
+    let head = ''
+    if (header && r.type) {
+      const spread = typePages.get(r.type) || []
+      const notes = []
+      if (spread[0] < pageIdx) notes.push(`continúa de la página ${spread[0] + 1}`)
+      notes.push(`${typeTotal.get(r.type)} producto${typeTotal.get(r.type) === 1 ? '' : 's'}`)
+      if (spread[spread.length - 1] > pageIdx) notes.push(`sigue en la página ${spread[spread.length - 1] + 1}`)
+      head = `<div class="sk-group"><strong>${esc(TYPE_LABELS[r.type] || r.type)}</strong><span>${esc(notes.join(' · '))}</span></div>`
+    }
+    const qty = r.qtyText ?? fmtQty(r.qty)
+    const second = r.sub || r.supplier || 'Sin proveedor'
+    return `${head}
+      <div class="sk-tr ${r.id && Number(r.id) === Number(state.selectedId) ? 'is-selected' : ''}" ${r.id ? `data-chem-id="${r.id}"` : ''} role="button" tabindex="0">
+        <code>${esc(r.code || '—')}</code>
+        <span class="sk-name" title="${esc(r.name || '')}">
+          <b>${esc(r.name || '—')}</b>
+          <small>${esc(second)}</small>
+        </span>
+        <span class="is-num">${r.lots == null ? '—' : esc(r.lots)}</span>
+        <span class="is-num sk-qty">
+          <span><b>${esc(qty || '0')}</b> <small>${esc(r.unit || 'kg')}</small></span>
+          ${r.min > 0 ? `<small>mín. ${esc(fmtQty(r.min))} ${esc(r.unit || 'kg')}</small>` : ''}
+        </span>
+        <span><em class="sk-status is-${r.status.tone}">${esc(r.status.label)}</em></span>
+      </div>`
+  }).join('')
+  body.querySelectorAll('[data-chem-id]').forEach((tr) => {
+    const open = () => openChemDrawer(Number(tr.dataset.chemId))
+    tr.onclick = open
+    tr.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open() } }
+  })
+
+  const before = pages.slice(0, pageIdx).reduce((n, p) => n + p.length, 0)
+  if (range) range.textContent = `${before + 1}–${before + current.length} de ${rows.length} químicos · página ${state.page} de ${totalPages}`
+  if (pager) {
+    pager.innerHTML = pagerHtml(state.page, totalPages, 5)
+    pager.querySelectorAll('[data-page]').forEach((btn) => {
+      btn.onclick = () => {
+        state.page = Number(btn.dataset.page)
+        paintTable()
+      }
+    })
+  }
+}
+
+function pagerHtml(page, total, windowSize) {
+  if (total <= 1) return ''
+  let start = Math.max(1, page - Math.floor(windowSize / 2))
+  const end = Math.min(total, start + windowSize - 1)
+  start = Math.max(1, end - windowSize + 1)
+  const nums = []
+  for (let i = start; i <= end; i++) {
+    nums.push(`<button type="button" data-page="${i}" class="${i === page ? 'is-active' : ''}" aria-label="Página ${i}">${i}</button>`)
+  }
+  return `
+    <button type="button" data-page="${page - 1}" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
+    ${nums.join('')}
+    <button type="button" data-page="${page + 1}" ${page >= total ? 'disabled' : ''} aria-label="Siguiente">›</button>`
+}
+
+// ---------------------------------------------------------------------------
+// Panel del químico
+// ---------------------------------------------------------------------------
+
+const MOVE_LABEL = { in: 'Entrada', out: 'Salida', adjustment: 'Ajuste', waste: 'Merma', return: 'Devolución' }
+
+function moveLabel(m) {
+  if (m.movement_type === 'out' && m.reference_type === 'laboratorio') return 'Salida a laboratorio'
+  return MOVE_LABEL[m.movement_type] || m.movement_type || 'Movimiento'
+}
+const LOT_STATUS = { active: 'Activo', depleted: 'Agotado', expired: 'Vencido' }
+
+let _chemDrawer = null
+
+function closeChemDrawer() {
+  if (!_chemDrawer) return
+  document.removeEventListener('keydown', _chemDrawer.onKey)
+  _chemDrawer.root.remove()
+  _chemDrawer = null
+  state.selectedId = null
+  document.querySelectorAll('.sk-tr.is-selected').forEach((el) => el.classList.remove('is-selected'))
+}
+
+async function openChemDrawer(id, tab = 'lots') {
+  closeChemDrawer()
+  state.selectedId = id
+  document.querySelectorAll('.sk-tr').forEach((el) => el.classList.toggle('is-selected', Number(el.dataset.chemId) === id))
+  const root = document.createElement('div')
+  root.className = 'rq-root'
+  root.innerHTML = `
+    <div class="rq-scrim"></div>
+    <aside class="rq-drawer cd-drawer" role="dialog" aria-modal="true" aria-labelledby="cd-title">
+      <div class="loading-state"><div class="spinner"></div><span>Cargando...</span></div>
+    </aside>`
+  document.body.appendChild(root)
+  const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('#modal-overlay[style*="flex"]')) closeChemDrawer() }
+  document.addEventListener('keydown', onKey)
+  _chemDrawer = { root, onKey, id }
+  root.querySelector('.rq-scrim').onclick = closeChemDrawer
+
+  let chem, lots, moves, occ
+  try {
+    ;[chem, lots, moves, occ] = await Promise.all([
+      chemicalsApi.get(id),
+      chemicalsApi.lots(id).catch(() => []),
+      chemicalsApi.movements(id).catch(() => []),
+      requestsApi.occ().catch(() => []),
+    ])
+  } catch (err) {
+    if (_chemDrawer?.root !== root) return
+    root.querySelector('.rq-drawer').innerHTML = `<div class="empty-state"><p>${esc(err.message)}</p></div>`
+    return
+  }
+  if (_chemDrawer?.root !== root) return
+  const history = (Array.isArray(occ) ? occ : [])
+    .filter((row) => itemKey(row.item_code) === itemKey(chem.code))
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  paintChemDrawer(root, chem, lots || [], moves || [], history, tab)
+}
+
+function paintChemDrawer(root, chem, lots, moves, history, tab) {
+  const unit = chem.unit || 'kg'
+  const labShown = expressLab(chem.lab_quantity || 0, unit)
+  const stockQty = Number(chem.stock_quantity || 0)
+  const min = Number(chem.min_stock_alert || 0)
+  const falta = Math.max(0, min - stockQty)
+  const status = chemStatus(chem)
+  const scale = Math.max(min * 1.5, stockQty, 1)
+  const pct = Math.min(100, Math.round((stockQty / scale) * 100))
+  const activeLots = lots.filter((l) => l.status === 'active')
+  const typeLabel = TYPE_LABELS[chemTypeOf(chem)] || chemTypeOf(chem)
+  const tabs = [
+    { id: 'lots', label: 'Lotes', count: activeLots.length || lots.length },
+    { id: 'moves', label: 'Movimientos', count: moves.length },
+    { id: 'sheet', label: 'Ficha técnica' },
+    { id: 'history', label: 'Historial', count: history.length },
+  ]
+
+  root.querySelector('.rq-drawer').innerHTML = `
+    <div class="rq-header">
+      <div>
+        <p class="cd-chips">
+          <code>${esc(chem.code || '—')}</code>
+          <span class="rq-cat">${esc(typeLabel)}</span>
+          <em class="sk-status is-${status.tone}">${esc(status.label)}</em>
+        </p>
+        <h3 id="cd-title">${esc(chem.name || '—')}</h3>
+        <p>${esc([chem.supplier || 'Sin proveedor', 'Bodega 10502'].join(' · '))}</p>
+      </div>
+      <button class="rq-close" type="button" aria-label="Cerrar">×</button>
+    </div>
+    <div class="rq-scroll">
+      <section class="cd-stock">
+        <div class="cd-stock-top">
+          <div class="cd-stock-balances">
+            <div>
+              <span>En bodega</span>
+              <strong>${esc(fmtQty(stockQty))}<small>${esc(unit)}</small></strong>
+            </div>
+            <div>
+              <span>En laboratorio</span>
+              <strong>${esc(fmtQty(labShown.qty))}<small>${esc(labShown.unit)}</small></strong>
+            </div>
+          </div>
+          <div class="cd-stock-min">
+            ${min > 0 ? `<span>Mínimo <b>${esc(fmtQty(min))} ${esc(unit)}</b></span>` : '<span>Sin mínimo definido</span>'}
+            ${falta > 0 ? `<span class="is-danger">Faltan ${esc(fmtQty(falta))} ${esc(unit)}</span>` : ''}
+          </div>
+        </div>
+        <div class="cd-bar is-${status.tone}"><span style="width:${pct}%"></span>${min > 0 ? `<i style="left:${Math.min(100, Math.round((min / scale) * 100))}%"></i>` : ''}</div>
+        <button type="button" class="btn btn-primary cd-move-btn" data-cd="move">Registrar movimiento</button>
+      </section>
+      <nav class="cd-tabs" role="tablist">
+        ${tabs.map((t) => `<button type="button" role="tab" data-cd-tab="${t.id}" class="${t.id === tab ? 'is-active' : ''}">${t.label}${t.count != null ? ` <b>${t.count}</b>` : ''}</button>`).join('')}
+      </nav>
+      <div class="cd-pane" data-cd-pane="lots" ${tab === 'lots' ? '' : 'hidden'}>${lotsPaneHtml(chem, lots)}</div>
+      <div class="cd-pane" data-cd-pane="moves" ${tab === 'moves' ? '' : 'hidden'}>${movesPaneHtml(chem, moves)}</div>
+      <div class="cd-pane" data-cd-pane="sheet" ${tab === 'sheet' ? '' : 'hidden'}>${sheetPaneHtml(chem)}</div>
+      <div class="cd-pane" data-cd-pane="history" ${tab === 'history' ? '' : 'hidden'}>${historyPaneHtml(chem, history)}</div>
+    </div>
+    <div class="rq-foot">
+      <button type="button" class="btn btn-secondary btn-sm" data-cd="edit">Editar ficha</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-cd="copy">Duplicar</button>
+      <span class="rq-dates"></span>
+      <button type="button" class="btn btn-ghost btn-sm text-danger" data-cd="off">Desactivar</button>
+    </div>`
+
+  const drawer = root.querySelector('.rq-drawer')
+  drawer.querySelector('.rq-close').onclick = closeChemDrawer
+  drawer.querySelectorAll('[data-cd-tab]').forEach((btn) => {
+    btn.onclick = () => {
+      drawer.querySelectorAll('[data-cd-tab]').forEach((b) => b.classList.toggle('is-active', b === btn))
+      drawer.querySelectorAll('[data-cd-pane]').forEach((p) => { p.hidden = p.dataset.cdPane !== btn.dataset.cdTab })
+    }
+  })
+  drawer.querySelector('[data-cd="move"]').onclick = () => openMovementForm(chem, lots)
+  drawer.querySelector('[data-cd="edit"]').onclick = () => {
+    closeChemDrawer()
+    openChemicalForm(chem.id, async () => {
+      await loadStock({ keepPage: true })
+      openChemDrawer(chem.id, 'sheet')
+    })
+  }
+  drawer.querySelector('[data-cd="copy"]').onclick = () => {
+    closeChemDrawer()
+    openChemicalForm(null, () => loadStock({ keepPage: true }), {
+      prefill: { ...chem, code: '', name: `${chem.name} (copia)` },
+    })
+  }
+  drawer.querySelector('[data-cd="off"]').onclick = async () => {
+    const ok = await confirm(`${esc(chem.name)} dejará de aparecer en el inventario y en las fórmulas nuevas.`, 'Desactivar químico')
+    if (!ok) return
+    try {
+      await chemicalsApi.delete(chem.id)
+      toast.success('Químico desactivado')
+      closeChemDrawer()
+      await loadStock({ keepPage: true })
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
+  drawer.querySelectorAll('[data-lot-expiry]').forEach((btn) => {
+    btn.onclick = () => {
+      const card = btn.closest('.cd-lot')
+      const form = card?.querySelector('.cd-lot-expiry')
+      if (form) form.hidden = !form.hidden
+    }
+  })
+  drawer.querySelectorAll('.cd-lot-expiry').forEach((form) => {
+    form.onsubmit = async (e) => {
+      e.preventDefault()
+      const value = form.querySelector('input').value
+      if (!value) return
+      try {
+        await chemicalsApi.updateLot(chem.id, Number(form.dataset.lotId), { expiry_date: value })
+        toast.success('Vencimiento guardado')
+        await loadStock({ keepPage: true })
+        openChemDrawer(chem.id, 'lots')
+      } catch (err) {
+        toast.error(err.message)
+      }
+    }
   })
 }
 
-function setPagerHost(hostId, key, page, totalPages) {
-  const host = document.getElementById(hostId)
-  if (!host) return
-  host.innerHTML = pagerMarkup(key, page, totalPages)
-}
-
-function renderGeneralCards() {
-  const list = document.getElementById('inv-general-list')
-  if (!list) return
-  scrubOrphanStockNodes('[data-panel="general"] .inv-board.is-success', 'inv-general-list')
-  PAGE_SIZE.general = PAGE_SIZE_BASE.general
-  if (!cache.general.length) {
-    list.replaceChildren()
-    list.insertAdjacentHTML('afterbegin', emptyMsg(generalType
-      ? `Sin químicos de tipo ${TYPE_LABELS[generalType] || generalType} en bodega`
-      : 'Sin químicos disponibles en bodega'))
-    setPagerHost('inv-general-pager', 'general', 1, 1)
-    return
-  }
-  const { items, page, totalPages } = slicePage('general')
-  const body = generalType
-    ? `<div class="inv-chem-grid">${items.map((c) => chemCard(c, 'disponible')).join('')}</div>`
-    : groupedCards(items)
-  list.replaceChildren()
-  list.insertAdjacentHTML('afterbegin', body)
-  setPagerHost('inv-general-pager', 'general', page, totalPages)
-}
-
-function groupedCards(items) {
-  const groups = []
-  for (const c of items) {
-    const type = chemTypeOf(c)
-    if (!groups.length || groups[groups.length - 1].type !== type) {
-      groups.push({ type, items: [c] })
-    } else {
-      groups[groups.length - 1].items.push(c)
-    }
-  }
-  return groups.map((group) => {
-    const total = generalAll.filter((c) => chemTypeOf(c) === group.type).length
+function lotsPaneHtml(chem, lots) {
+  if (!lots.length) return '<p class="sk-empty">Sin lotes. El lote se crea al ingresar el producto por OCC o al cargar el inventario.</p>'
+  const unit = chem.unit || 'kg'
+  const ordered = [...lots].sort((a, b) => (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1))
+  return ordered.map((l) => {
+    const cost = Number(l.unit_cost || 0)
+    const left = Number(l.quantity_remaining || 0)
+    const days = daysUntil(l.expiry_date)
+    const expiry = l.expiry_date
+      ? `<em class="sk-status is-${days != null && days < 0 ? 'danger' : days != null && days <= 30 ? 'warning' : 'success'}">${esc(formatDay(l.expiry_date))}${days != null && days >= 0 ? ` · ${days} días` : days != null ? ' · vencido' : ''}</em>`
+      : '<em class="sk-status is-warning">Sin fecha de vencimiento</em>'
     return `
-    <div class="inv-type-band is-${esc(group.type)}">
-      <span class="inv-type-dot"></span>
-      <strong>${esc(TYPE_LABELS[group.type] || group.type)}</strong>
-      <span class="inv-type-band-count">${total}</span>
-    </div>
-    <div class="inv-chem-grid">${group.items.map((c) => chemCard(c, 'disponible')).join('')}</div>
-  `
+      <article class="cd-lot ${l.status !== 'active' ? 'is-off' : ''}">
+        <header>
+          <div><span>Lote</span><code>${esc(l.lot_number || '—')}</code></div>
+          <strong>${esc(fmtQty(left))} <small>${esc(l.unit || unit)}</small></strong>
+        </header>
+        <dl>
+          <div><dt>Recibido</dt><dd>${esc(fmtQty(l.quantity_received))} ${esc(l.unit || unit)}</dd></div>
+          ${Number(l.lab_quantity) > 0 ? `<div><dt>En laboratorio</dt><dd>${esc(labText(l.lab_quantity, l.unit || unit))}</dd></div>` : ''}
+          <div><dt>Fecha de compra</dt><dd>${esc(formatDay(l.purchase_date || l.created_at) || '—')}</dd></div>
+          <div><dt>Costo unitario</dt><dd>${cost > 0 ? `${esc(fmtMoney(cost))} / ${esc(l.unit || unit)}` : '—'}</dd></div>
+          <div><dt>Valor del lote</dt><dd>${cost > 0 ? esc(fmtMoney(cost * left)) : '—'}</dd></div>
+          <div class="is-wide">
+            <dt>Vencimiento</dt>
+            <dd class="cd-lot-exp">${expiry}${l.status === 'active' ? `<button type="button" class="cd-link" data-lot-expiry>${l.expiry_date ? 'Cambiar fecha' : 'Agregar fecha'}</button>` : ''}</dd>
+          </div>
+          ${l.status !== 'active' ? `<div><dt>Estado</dt><dd>${esc(LOT_STATUS[l.status] || l.status)}</dd></div>` : ''}
+        </dl>
+        <form class="cd-lot-expiry" data-lot-id="${l.id}" hidden>
+          <input type="date" class="form-input" value="${esc(String(l.expiry_date || '').slice(0, 10))}" required>
+          <button type="submit" class="btn btn-primary btn-sm">Guardar</button>
+        </form>
+      </article>`
   }).join('')
 }
 
-function chemCard(c, kind) {
-  const type = c.chemical_type || 'otros'
-  const art = CHEM_ART[type] || CHEM_ART.otros
-  const typeLabel = TYPE_LABELS[type] || type
-  const unit = c.unit || 'kg'
-  const stock = Number(c.stock_quantity || 0)
-  const pending = Number(c.pending_qty || 0)
-  const price = fmtPrice(c.last_unit_price, c.last_unit_currency)
-  const supplier = String(c.supplier || '').trim()
-
-  let main = ''
-  let extra = ''
-  if (kind === 'disponible') {
-    const partial = pending > 0
-    main = `<p class="inv-chem-main is-success">${fmtQty(stock, 2)} ${esc(unit)}</p>`
-    extra = [
-      partial ? `<span class="inv-badge is-partial">Parcial</span>` : '',
-      partial ? `<p class="inv-chem-sub">pendiente ${fmtQty(pending)} ${esc(unit)}</p>` : '',
-    ].join('')
-  } else if (kind === 'espera') {
-    extra = `<span class="inv-badge">En espera</span>`
-  } else {
-    if (pending > 0) main = `<p class="inv-chem-main is-accent">${fmtQty(pending)} ${esc(unit)}</p>`
-    extra = [
-      supplier ? `<span class="inv-chem-sub">${esc(supplier)}</span>` : '',
-      price ? `<span class="inv-chem-sub">${esc(price)}</span>` : '',
-    ].join('')
-  }
-
-  return `
-    <article class="inv-chem is-${kind}${kind === 'disponible' && pending > 0 ? ' is-partial' : ''}">
-      <div class="inv-chem-art is-${esc(type)}">${art}</div>
-      <span class="inv-chem-code">${esc(c.code || '')}</span>
-      <p class="inv-chem-name" title="${esc(c.name || '')}">${esc(c.name || '')}</p>
-      <p class="inv-chem-type">${esc(typeLabel)}</p>
-      ${main}
-      ${extra}
-    </article>`
-}
-
-function board({ theme, icon, title, subtitle, count, body }) {
-  return `
-    <section class="inv-board is-${theme}">
-      <header class="inv-board-head">
-        <div class="inv-board-icon">${icon}</div>
-        <div class="inv-board-copy">
-          <h3>${esc(title)}</h3>
-          <p>${esc(subtitle)}</p>
+function movesPaneHtml(chem, moves) {
+  if (!moves.length) return '<p class="sk-empty">Sin movimientos registrados.</p>'
+  return `<div class="cd-list">${moves.map((m) => {
+    const kind = m.movement_type || ''
+    const qty = Number(m.quantity) || 0
+    const negative = kind === 'out' || kind === 'waste' || (kind === 'adjustment' && qty < 0)
+    return `
+      <div class="sk-move">
+        <div>
+          <strong>${esc(moveLabel(m))}${m.lot_number ? ` · <code>${esc(m.lot_number)}</code>` : ''}</strong>
+          <small>${esc([formatDay(m.created_at), fmtTime(m.created_at), m.user_name].filter(Boolean).join(' · '))}${m.notes ? ` — ${esc(m.notes)}` : ''}</small>
         </div>
-        <span class="inv-board-count">${count}</span>
-      </header>
-      ${body}
-    </section>`
+        <div class="sk-move-qty">
+          <b class="${negative ? 'is-out' : 'is-in'}">${negative ? '−' : '+'}${esc(moveQtyText(m, chem.unit))}</b>
+        </div>
+      </div>`
+  }).join('')}</div>`
 }
 
-function emptyMsg(text) {
-  return `<p class="inv-empty">${esc(text)}</p>`
-}
-
-function paintMini(key, itemHtml, emptyText) {
-  const el = document.getElementById(`inv-${key}-list`)
-  if (!el) return
-  scrubOrphanStockNodes(`[data-panel="${key}"] .inv-board`, `inv-${key}-list`)
-  PAGE_SIZE[key] = resolvePageSize(key)
-  if (!cache[key].length) {
-    el.replaceChildren()
-    el.insertAdjacentHTML('afterbegin', emptyMsg(emptyText))
-    setPagerHost(`inv-${key}-pager`, key, 1, 1)
-    return
-  }
-  const { items, page, totalPages } = slicePage(key)
-  el.replaceChildren()
-  el.insertAdjacentHTML('afterbegin', `<div class="inv-mini-grid">${items.map(itemHtml).join('')}</div>`)
-  setPagerHost(`inv-${key}-pager`, key, page, totalPages)
-}
-
-function paintTransit() {
-  const el = document.getElementById('inv-transit-list')
-  if (!el) return
-  scrubOrphanStockNodes('[data-panel="transit"] .inv-board', 'inv-transit-list')
-  PAGE_SIZE.transit = resolvePageSize('transit')
-  if (!cache.transit.length) {
-    el.innerHTML = emptyMsg('Sin items en espera o pedido. Importa SOC/OCC en Solicitudes.')
-    return
-  }
-  const { items, page, totalPages } = slicePage('transit')
-  const waiting = items.filter(isWaiting)
-  const ordered = items.filter((c) => !isWaiting(c)).sort(byOccNumber)
-  const waitBlock = waiting.length
-    ? `<p class="inv-subhead">En espera</p>
-       <div class="inv-mini-grid">${waiting.map(miniWaiting).join('')}</div>`
-    : ''
-  const orderBlock = ordered.length
-    ? `<p class="inv-subhead">Pedido</p>
-       <div class="inv-mini-grid">${ordered.map(miniOrdered).join('')}</div>`
-    : ''
-  el.replaceChildren()
-  el.insertAdjacentHTML('afterbegin', `<div class="inv-board-body">${waitBlock}${orderBlock}</div>`)
-  setPagerHost('inv-transit-pager', 'transit', page, totalPages)
-}
-
-function paintMovements() {
-  const container = document.getElementById('movements-list')
-  if (!container) return
-  PAGE_SIZE.movements = resolvePageSize('movements')
-  if (!cache.movements.length) {
-    container.replaceChildren()
-    container.insertAdjacentHTML('afterbegin', '<p class="inv-empty">Sin movimientos registrados</p>')
-    setPagerHost('inv-movements-pager', 'movements', 1, 1)
-    return
-  }
-  const { items, page, totalPages } = slicePage('movements')
-  container.replaceChildren()
-  container.insertAdjacentHTML('afterbegin', `<div class="inv-side-moves">${items.map(moveCard).join('')}</div>`)
-  setPagerHost('inv-movements-pager', 'movements', page, totalPages)
-}
-
-function moveCard(m) {
-  const kind = m.movement_type === 'in' ? 'in' : m.movement_type === 'out' ? 'out' : 'adj'
-  const label = kind === 'in' ? 'Entrada' : kind === 'out' ? 'Salida' : 'Ajuste'
-  const qty = Number(m.quantity) || 0
-  const signed = kind === 'out' ? `−${fmtQty(Math.abs(qty), 3)}` : `+${fmtQty(Math.abs(qty), 3)}`
-  const when = formatDay(m.created_at) || (m.created_at || '').split('T')[0] || ''
+function sheetPaneHtml(chem) {
+  const fields = [
+    ['Unidad', chem.unit || 'kg'],
+    ['Ubicación', chem.location || 'Sin asignar'],
+    ['Stock mínimo', Number(chem.min_stock_alert) > 0 ? `${fmtQty(chem.min_stock_alert)} ${chem.unit || 'kg'}` : 'Sin definir'],
+    ['Densidad', chem.density_g_ml ? `${fmtQty(chem.density_g_ml, 3)} g/mL` : '—'],
+    ['Número CAS', chem.cas_number || 'Sin registrar'],
+    ['Material peligroso', Number(chem.is_hazardous) ? 'Sí' : 'No'],
+    ['Último precio', Number(chem.last_unit_price) > 0 ? `${fmtMoney(chem.last_unit_price)} / ${chem.unit || 'kg'}` : '—'],
+    ['Proveedor', chem.supplier || 'Sin proveedor'],
+  ]
   return `
-    <article class="inv-move is-${kind}">
-      <div class="inv-move-top">
-        <strong title="${esc(m.chemical_name || '')}">${esc(m.chemical_name || '—')}</strong>
-        <span class="inv-move-qty">${signed} ${esc(m.unit || 'kg')}</span>
+    <dl class="cd-sheet">
+      ${fields.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}
+      ${chem.safety_notes ? `<div class="is-wide"><dt>Notas de seguridad</dt><dd>${esc(chem.safety_notes)}</dd></div>` : ''}
+      ${chem.notes ? `<div class="is-wide"><dt>Notas</dt><dd>${esc(chem.notes)}</dd></div>` : ''}
+    </dl>`
+}
+
+function historyPaneHtml(chem, rows) {
+  if (!rows.length) return '<p class="sk-empty">Sin compras registradas por OCC.</p>'
+  const unit = chem.unit || 'kg'
+  return `<div class="cd-list">${rows.map((r) => {
+    const ordered = Number(r.qty_ordered || 0)
+    const entered = Number(r.qty_entered || 0)
+    const done = ordered > 0 && entered + 1e-4 >= ordered
+    return `
+      <div class="sk-move">
+        <div>
+          <strong>${esc(r.occ_number || 'OCC')}${r.soc_number ? ` · ${esc(r.soc_number)}` : ''}</strong>
+          <small>${esc([formatDay(r.created_at), r.supplier, Number(r.unit_price) > 0 ? `${fmtMoney(r.unit_price)} / ${unit}` : ''].filter(Boolean).join(' · '))}</small>
+        </div>
+        <div class="sk-move-qty">
+          <b>${esc(fmtQty(entered))} / ${esc(fmtQty(ordered))} ${esc(unit)}</b>
+          <small>${done ? 'Entregado' : entered > 0 ? 'Parcial' : 'Pedido'}</small>
+        </div>
+      </div>`
+  }).join('')}</div>`
+}
+
+function openMovementForm(chem, lots) {
+  const unit = chem.unit || 'kg'
+  const active = lots.filter((l) => l.status === 'active' || Number(l.quantity_remaining) > 0)
+  const kinds = [
+    { id: 'in', label: 'Entrada' },
+    { id: 'out', label: 'Salida' },
+    { id: 'adj-up', label: 'Ajuste +' },
+    { id: 'adj-down', label: 'Ajuste −' },
+    { id: 'waste', label: 'Merma' },
+  ]
+  openModal(`Registrar movimiento · ${chem.name}`, `
+    <form id="mv-form">
+      <div class="form-group">
+        <label class="form-label">Tipo</label>
+        <div class="mf-pills" role="group" aria-label="Tipo de movimiento">
+          ${kinds.map((k, i) => `<button type="button" class="mf-pill is-accent${i === 0 ? ' is-on' : ''}" data-mv-kind="${k.id}">${k.label}</button>`).join('')}
+        </div>
       </div>
-      <div class="inv-move-meta">
-        <span>${esc(when)}</span>
-        <span>${label}</span>
-        ${m.user_name ? `<span>${esc(m.user_name)}</span>` : ''}
+      <div class="form-group" id="mv-dest-wrap" hidden>
+        <label class="form-label">Destino de la salida</label>
+        <div class="mf-pills" role="group" aria-label="Destino">
+          <button type="button" class="mf-pill is-accent is-on" data-mv-dest="consumo">Consumo</button>
+          <button type="button" class="mf-pill is-accent" data-mv-dest="laboratorio">Laboratorio</button>
+        </div>
+        <p class="form-hint" id="mv-dest-hint">Sale de bodega y no entra a otro inventario.</p>
       </div>
-      ${m.notes ? `<p class="inv-move-ref">${esc(m.notes)}</p>` : ''}
-    </article>`
-}
-
-function slicePage(key) {
-  const items = cache[key] || []
-  const size = PAGE_SIZE[key]
-  const totalPages = Math.max(1, Math.ceil(items.length / size))
-  let page = pages[key] || 1
-  if (page > totalPages) page = totalPages
-  if (page < 1) page = 1
-  pages[key] = page
-  const start = (page - 1) * size
-  return { items: items.slice(start, start + size), page, totalPages, total: items.length }
-}
-
-function pagerMarkup(key, page, totalPages) {
-  if (totalPages <= 1) return ''
-  return `
-    <nav class="inv-pager" data-pager="${key}" aria-label="Paginación">
-      <button type="button" class="inv-pager-btn" data-dir="-1" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
-      <span>${page} / ${totalPages}</span>
-      <button type="button" class="inv-pager-btn" data-dir="1" ${page >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>
-    </nav>`
-}
-
-function paintKey(key) {
-  if (key === 'general') renderGeneralCards()
-  else if (key === 'movements') paintMovements()
-  else if (key === 'critical') paintMini('critical', miniLowStock, 'Sin alertas de stock bajo')
-  else if (key === 'expiring') paintMini('expiring', miniExpiring, 'Sin lotes por vencer')
-  else if (key === 'transit') paintTransit()
-}
-
-function miniLowStock(c) {
-  const min = Number(c.min_stock_alert)
-  const showMin = Number.isFinite(min) && min > 0
-  return `
-    <div class="inv-mini">
-      <div class="inv-mini-top">
-        <span class="inv-mini-ico is-danger">${ICON.flask}</span>
-        <span class="inv-mini-code">${esc(c.code || '')}</span>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Cantidad <span class="required"></span></label>
+          <div class="mf-unit" id="mv-unit-box">
+            <input id="mv-qty" class="form-input" type="number" min="0.001" step="0.001" required>
+            <select id="mv-unit" class="mf-unit-select" hidden></select>
+            <span id="mv-unit-label">${esc(unit)}</span>
+          </div>
+          <p class="form-hint" id="mv-stock-hint"></p>
+          <p class="form-hint" id="mv-convert" hidden></p>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Lote</label>
+          <select id="mv-lot" class="form-select">
+            <option value="">Sin lote</option>
+            ${active.map((l) => `<option value="${l.id}">${esc(l.lot_number)} · ${esc(fmtQty(l.quantity_remaining))} ${esc(l.unit || unit)}</option>`).join('')}
+          </select>
+        </div>
       </div>
-      <p class="inv-mini-name" title="${esc(c.name || '')}">${esc(c.name || '')}</p>
-      <p class="inv-mini-main is-danger">${fmtQty(c.stock_quantity, 2)} ${esc(c.unit || 'kg')}</p>
-      ${showMin ? `<p class="inv-mini-sub">mínimo ${fmtQty(min, 2)} ${esc(c.unit || 'kg')}</p>` : ''}
-    </div>`
-}
-
-function miniExpiring(l) {
-  const days = daysUntil(l.expiry_date)
-  const main = days == null
-    ? ''
-    : days < 0
-      ? '<p class="inv-mini-main is-danger">Vencido</p>'
-      : days === 0
-        ? '<p class="inv-mini-main is-warning">Vence hoy</p>'
-        : `<p class="inv-mini-main is-warning">${days} ${days === 1 ? 'día' : 'días'}</p>`
-  const expiry = formatDay(l.expiry_date)
-  return `
-    <div class="inv-mini">
-      <div class="inv-mini-top">
-        <span class="inv-mini-ico is-warning">${ICON.flask}</span>
-        <span class="inv-mini-code">${esc(l.chemical_code || '')}</span>
+      <div class="form-group">
+        <label class="form-label">Nota</label>
+        <input id="mv-notes" class="form-input" placeholder="Motivo del movimiento">
       </div>
-      <p class="inv-mini-name" title="${esc(l.chemical_name || '')}">${esc(l.chemical_name || '')}</p>
-      ${main}
-      ${l.lot_number ? `<p class="inv-mini-sub">${esc(l.lot_number)}</p>` : ''}
-      ${expiry ? `<p class="inv-mini-sub">${esc(expiry)}</p>` : ''}
-    </div>`
-}
-
-function miniWaiting(c) {
-  return `
-    <div class="inv-mini">
-      <div class="inv-mini-top">
-        <span class="inv-mini-ico is-accent">${ICON.flask}</span>
-        <span class="inv-mini-code">${esc(c.code || '')}</span>
-      </div>
-      <p class="inv-mini-name" title="${esc(c.name || '')}">${esc(c.name || '')}</p>
-      <span class="inv-badge">En espera</span>
-    </div>`
-}
-
-function miniOrdered(c) {
-  const unit = c.unit || 'kg'
-  const ordered = Number(c.qty_ordered)
-  const entered = Number(c.qty_entered)
-  const pending = Number(c.qty_pending ?? c.pending_qty)
-  const hasOrdered = Number.isFinite(ordered) && ordered > 0
-  const enteredQty = Number.isFinite(entered) && entered > 0 ? entered : 0
-  const falta = hasOrdered
-    ? Math.max(0, ordered - enteredQty)
-    : (Number.isFinite(pending) && pending > 0 ? pending : 0)
-  const partial = hasOrdered && enteredQty > 0 && falta > 1e-4
-  const pct = hasOrdered ? Math.min(100, Math.round((enteredQty / ordered) * 100)) : 0
-  const price = fmtPrice(c.last_unit_price, c.last_unit_currency)
-  const supplier = String(c.supplier || '').trim()
-  const occ = String(c.occ_number || '').trim()
-  const extraOcc = Number(c.occ_count) > 1 ? ` +${Number(c.occ_count) - 1}` : ''
-  const occLabel = occ ? `${occ}${extraOcc}` : ''
-
-  let qtyBlock = ''
-  if (hasOrdered) {
-    qtyBlock = `
-      <p class="inv-mini-main">${fmtQty(enteredQty)} / ${fmtQty(ordered)} ${esc(unit)}</p>
-      <div class="inv-mini-fill" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
-        <span style="width:${pct}%"></span>
-      </div>
-      <p class="inv-mini-sub">${falta > 0 ? `faltan ${fmtQty(falta)} ${esc(unit)}` : 'Entrega completa'}</p>`
-  } else if (falta > 0) {
-    qtyBlock = `<p class="inv-mini-main">${fmtQty(falta)} ${esc(unit)}</p>`
-  }
-
-  return `
-    <div class="inv-mini is-ordered${partial ? ' is-partial' : ''}">
-      ${occLabel ? `<p class="inv-mini-occ" title="${esc(occLabel)}">${esc(occLabel)}</p>` : ''}
-      ${partial ? '<span class="inv-badge is-partial">Parcial</span>' : ''}
-      <div class="inv-mini-top">
-        <span class="inv-mini-ico is-accent">${ICON.flask}</span>
-        <span class="inv-mini-code">${esc(c.code || '')}</span>
-      </div>
-      <p class="inv-mini-name" title="${esc(c.name || '')}">${esc(c.name || '')}</p>
-      ${qtyBlock}
-      ${supplier ? `<a class="inv-supplier" href="#" data-goto-chemicals="${esc(supplier)}">${esc(supplier)}</a>` : ''}
-      ${price ? `<p class="inv-mini-sub">${esc(price)}</p>` : ''}
-    </div>`
-}
-
-function bindStockClicks(container) {
-  container.removeEventListener('click', onStockClick)
-  container.addEventListener('click', onStockClick)
-}
-
-function onStockClick(event) {
-  const typeBtn = event.target.closest('[data-inv-type]')
-  if (typeBtn) {
-    event.preventDefault()
-    generalType = typeBtn.dataset.invType || ''
-    paintTypeFilters()
-    applyGeneralFilter()
-    return
-  }
-  const pagerBtn = event.target.closest('.inv-pager-btn')
-  if (pagerBtn) {
-    event.preventDefault()
-    event.stopPropagation()
-    if (pagerBtn.disabled) return
-    const nav = pagerBtn.closest('[data-pager]')
-    if (!nav) return
-    const key = nav.dataset.pager
-    pages[key] = (pages[key] || 1) + Number(pagerBtn.dataset.dir)
-    paintKey(key)
-    if (key === 'general') {
-      scrollStockListIntoView(document.getElementById('inv-general-list'))
-    } else if (key === 'movements') {
-      scrollStockListIntoView(document.getElementById('movements-list'))
+      <div id="mv-error" class="form-error" style="display:none"></div>
+    </form>`, {
+    footerHTML: `
+      <button class="btn btn-secondary" id="mv-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="mv-submit">Registrar</button>`,
+  })
+  let kind = 'in'
+  let destination = 'consumo'
+  const destWrap = document.getElementById('mv-dest-wrap')
+  const qtyInput = document.getElementById('mv-qty')
+  const unitSelect = document.getElementById('mv-unit')
+  const unitLabel = document.getElementById('mv-unit-label')
+  const unitBox = document.getElementById('mv-unit-box')
+  const choices = entryUnits(unit)
+  const labEntry = () => kind === 'out' && destination === 'laboratorio' && choices.length > 1
+  const entryUnit = () => (labEntry() ? unitSelect.value : unit)
+  const paintEntry = () => {
+    const lab = labEntry()
+    destWrap.hidden = kind !== 'out'
+    unitSelect.hidden = !lab
+    unitLabel.hidden = lab
+    unitBox.classList.toggle('is-choice', lab)
+    if (lab) {
+      const current = choices.includes(unitSelect.value) ? unitSelect.value : labUnit(unit)
+      unitSelect.innerHTML = choices.map((u) => `<option value="${u}">${u}</option>`).join('')
+      unitSelect.value = current
+      qtyInput.step = current === 'g' || current === 'mL' ? '0.1' : '0.001'
+      qtyInput.min = current === 'g' || current === 'mL' ? '0.1' : '0.001'
     } else {
-      scrollStockListIntoView(document.getElementById(`inv-${key}-list`))
+      qtyInput.step = '0.001'
+      qtyInput.min = '0.001'
     }
-    return
+    const labShown = expressLab(chem.lab_quantity || 0, unit)
+    document.getElementById('mv-stock-hint').textContent =
+      `En bodega: ${fmtQty(chem.stock_quantity)} ${unit} · En laboratorio: ${fmtQty(labShown.qty)} ${labShown.unit}`
+    const typed = parseFloat(qtyInput.value)
+    const entered = entryUnit()
+    const convert = document.getElementById('mv-convert')
+    const baseQty = Number.isFinite(typed) ? convertQty(typed, entered, unit) : null
+    if (lab && entered !== unit && baseQty != null && typed > 0) {
+      convert.hidden = false
+      convert.textContent = `${fmtQty(typed, 1)} ${entered} salen como ${fmtQty(baseQty, 3)} ${unit} de bodega.`
+    } else {
+      convert.hidden = true
+      convert.textContent = ''
+    }
   }
-  const el = event.target.closest('[data-goto-chemicals]')
-  if (!el) return
-  event.preventDefault()
+  paintEntry()
+  document.querySelectorAll('[data-mv-kind]').forEach((btn) => {
+    btn.onclick = () => {
+      kind = btn.dataset.mvKind
+      document.querySelectorAll('[data-mv-kind]').forEach((b) => b.classList.toggle('is-on', b === btn))
+      paintEntry()
+    }
+  })
+  document.querySelectorAll('[data-mv-dest]').forEach((btn) => {
+    btn.onclick = () => {
+      destination = btn.dataset.mvDest
+      document.querySelectorAll('[data-mv-dest]').forEach((b) => b.classList.toggle('is-on', b === btn))
+      document.getElementById('mv-dest-hint').textContent = destination === 'laboratorio'
+        ? `Sale de bodega y entra al inventario de laboratorio. Puedes anotarlo en ${labUnit(unit)}.`
+        : 'Sale de bodega y no entra a otro inventario.'
+      paintEntry()
+    }
+  })
+  unitSelect.onchange = paintEntry
+  qtyInput.oninput = paintEntry
+  document.getElementById('mv-cancel').onclick = () => closeModal()
+  document.getElementById('mv-submit').onclick = async () => {
+    const errEl = document.getElementById('mv-error')
+    const typed = parseFloat(qtyInput.value)
+    const entered = entryUnit()
+    const qty = convertQty(typed, entered, unit)
+    if (!typed || typed <= 0 || qty == null || qty <= 0) {
+      errEl.textContent = 'Indica una cantidad mayor que cero'
+      errEl.style.display = 'block'
+      return
+    }
+    const lotId = Number(document.getElementById('mv-lot').value) || undefined
+    const payload = {
+      movement_type: kind.startsWith('adj') ? 'adjustment' : kind,
+      direction: kind === 'adj-up' ? 'up' : kind === 'adj-down' ? 'down' : undefined,
+      quantity: qty,
+      unit,
+      lot_id: lotId,
+      destination: kind === 'out' ? destination : undefined,
+      notes: document.getElementById('mv-notes').value.trim() || undefined,
+    }
+    const btn = document.getElementById('mv-submit')
+    btn.disabled = true
+    errEl.style.display = 'none'
+    try {
+      await chemicalsApi.addMovement(chem.id, payload)
+      toast.success('Movimiento registrado')
+      closeModal()
+      await loadStock({ keepPage: true })
+      openChemDrawer(chem.id, 'moves')
+    } catch (err) {
+      errEl.textContent = err.message
+      errEl.style.display = 'block'
+      btn.disabled = false
+    }
+  }
 }
 
-async function loadMovements() {
-  const container = document.getElementById('movements-list')
-  if (!container) return
-  try {
-    const data = await stock.movements({ limit: 500 })
-    cache.movements = data
-    pages.movements = 1
-    paintMovements()
-  } catch (err) {
-    container.innerHTML = `<p class="inv-empty">${esc(err.message)}</p>`
+function fmtMoney(n) {
+  const amount = Number(n)
+  if (!Number.isFinite(amount)) return ''
+  return `$${amount.toLocaleString('es-CO', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+}
+
+// ---------------------------------------------------------------------------
+// Movimientos
+// ---------------------------------------------------------------------------
+
+function moveKind(m) {
+  if (m.movement_type === 'in') return 'in'
+  if (m.movement_type === 'out' || m.movement_type === 'waste') return 'out'
+  return 'adjustment'
+}
+
+function moveGroupKey(m) {
+  const day = String(m.created_at || '').slice(0, 10)
+  return `${day}|${m.notes || m.reference_type || moveKind(m)}|${m.user_name || ''}`
+}
+
+function paintMoves() {
+  const body = document.getElementById('sk-moves-body')
+  if (!body) return
+  const list = state.movements.filter((m) => state.moveTab === 'all' || moveKind(m) === state.moveTab)
+  const range = document.getElementById('sk-move-range')
+  const pager = document.getElementById('sk-move-pager')
+  if (!list.length) {
+    body.innerHTML = '<p class="sk-empty">Sin movimientos registrados</p>'
+    if (range) range.textContent = ''
+    if (pager) pager.innerHTML = ''
+    return
   }
+  const groupSizes = new Map()
+  for (const m of list) {
+    const key = moveGroupKey(m)
+    groupSizes.set(key, (groupSizes.get(key) || 0) + 1)
+  }
+  const capacity = Math.max(MOVE_ROW_H * 2, body.clientHeight)
+  const pages = paginate(list, capacity, MOVE_GROUP_H, MOVE_ROW_H, moveGroupKey)
+  state.movePages = pages
+  const totalPages = Math.max(1, pages.length)
+  if (state.movePage > totalPages) state.movePage = totalPages
+  if (state.movePage < 1) state.movePage = 1
+  const current = pages[state.movePage - 1] || []
+
+  body.innerHTML = current.map(({ entry: m, header }) => {
+    const kind = moveKind(m)
+    const qty = Math.abs(Number(m.quantity) || 0)
+    const negative = kind === 'out' || Number(m.quantity) < 0
+    const label = moveLabel(m)
+    let head = ''
+    if (header) {
+      const n = groupSizes.get(moveGroupKey(m)) || 1
+      head = `
+        <div class="sk-move-group">
+          <strong>${esc(fmtLongDay(m.created_at))} · ${esc(m.notes || label)}</strong>
+          <span>${esc(['Bodega 10502', m.user_name, `${n} producto${n === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span>
+        </div>`
+    }
+    return `${head}
+      <div class="sk-move">
+        <div>
+          <strong title="${esc(m.chemical_name || '')}">${esc(m.chemical_name || '—')}</strong>
+          <small>${esc(fmtTime(m.created_at))}</small>
+        </div>
+        <div class="sk-move-qty">
+          <b class="${negative ? 'is-out' : 'is-in'}">${negative ? '−' : '+'}${esc(moveQtyText(m))}</b>
+          <small>${label}</small>
+        </div>
+      </div>`
+  }).join('')
+
+  if (range) range.textContent = `${list.length} movimiento${list.length === 1 ? '' : 's'}`
+  if (pager) {
+    pager.innerHTML = totalPages > 1 ? `
+      <button type="button" data-page="${state.movePage - 1}" ${state.movePage <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
+      <span>${state.movePage} / ${totalPages}</span>
+      <button type="button" data-page="${state.movePage + 1}" ${state.movePage >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>` : ''
+    pager.querySelectorAll('[data-page]').forEach((btn) => {
+      btn.onclick = () => {
+        state.movePage = Number(btn.dataset.page)
+        paintMoves()
+      }
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Formatos
+// ---------------------------------------------------------------------------
+
+function parseStamp(value) {
+  if (!value) return null
+  const raw = String(value).trim()
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : raw.replace(' ', 'T') + 'Z'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+function fmtLongDay(value) {
+  const d = parseStamp(value)
+  if (!d) return ''
+  return d.toLocaleDateString('es-CO', { day: 'numeric', month: 'long' })
+}
+
+function fmtTime(value) {
+  const d = parseStamp(value)
+  if (!d) return ''
+  return d.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 function daysUntil(value) {
@@ -952,20 +1155,26 @@ function formatDay(value) {
   })
 }
 
+function labText(qty, unit) {
+  const shown = expressLab(qty, unit)
+  const digits = shown.unit === 'g' || shown.unit === 'mL' ? 1 : 2
+  return `${fmtQty(shown.qty, digits)} ${shown.unit}`
+}
+
+function moveQtyText(m, fallbackUnit) {
+  const qty = Math.abs(Number(m.quantity) || 0)
+  const unit = m.unit || fallbackUnit || 'kg'
+  if (m.reference_type === 'laboratorio') return labText(qty, unit)
+  return `${fmtQty(qty, 3)} ${unit}`
+}
+
 function fmtQty(n, fractionDigits) {
   if (n == null || n === '') return ''
   const digits = fractionDigits == null ? undefined : fractionDigits
   return Number(n).toLocaleString('es-CO', {
-    minimumFractionDigits: digits ?? 0,
+    minimumFractionDigits: 0,
     maximumFractionDigits: digits ?? 2,
   })
-}
-
-function fmtPrice(n, currency) {
-  const amount = Number(n)
-  if (!Number.isFinite(amount) || amount <= 0) return ''
-  const formatted = amount.toLocaleString('es-CO', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
-  return (currency || 'COP') === 'COP' ? `$${formatted}` : `${formatted} ${currency}`
 }
 
 function esc(value) {

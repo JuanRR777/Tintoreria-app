@@ -1,4 +1,4 @@
-const PRIMARY = '#0284c7'
+const PRIMARY = '#2f5fd8'
 
 function swal() {
   const Swal = window.Swal

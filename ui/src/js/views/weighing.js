@@ -1,6 +1,5 @@
 /**
- * Pesaje de los químicos de la receta del proceso.
- * La báscula queda como apoyo opcional para tomar el peso real.
+ * Pesaje de los químicos de la receta. El peso real sale de la báscula.
  */
 import { processes as api, scales, openScaleSocket } from '../api.js'
 import { toast }  from '../components/toast.js'
@@ -8,17 +7,21 @@ import { confirm } from '../components/modal.js'
 import { navigate } from '../router.js'
 import { setPageHeader } from '../layout.js'
 import {
-  esc, fmtQty, isWeighed, lotLine, processMetaLine, processStage,
+  esc, isWeighed, lotLine, processMetaLine, processStage,
   renderStepper, stageBadge, weighCounts,
 } from '../components/process-ui.js'
 
 let _ws       = null
 let _scaleId  = null
+let _scaleMeta = null
+let _closing  = false
+let _live = { connected: false, weight: null, stable: false, unit: '', port: '' }
+let _weighings = []
 
 export async function showView(container, params = {}) {
   setPageHeader({
     title: 'Pesaje',
-    subtitle: 'Confirma los químicos de la receta e inicia la tinción',
+    subtitle: 'Captura el peso de cada químico desde la báscula',
   })
   container.innerHTML = `
     <div id="weighing-content"></div>
@@ -34,8 +37,19 @@ export async function showView(container, params = {}) {
   await renderWeighingPanel(document.getElementById('weighing-content'), processId)
 
   return () => {
-    if (_ws) { _ws.close(); _ws = null }
+    closeScaleSocket()
   }
+}
+
+function closeScaleSocket() {
+  _closing = true
+  if (_ws) {
+    try { _ws.close() } catch { /* ignore */ }
+  }
+  _ws = null
+  _live.connected = false
+  _live.weight = null
+  _live.stable = false
 }
 
 async function renderProcessSelector(container) {
@@ -101,14 +115,16 @@ async function renderWeighingPanel(container, processId) {
     ])
 
     process.weighings = weighings
-    _scaleId = _scaleId || scaleList[0]?.id || null
+    _weighings = weighings
+    const actives = scaleList.filter((s) => Number(s.is_active) !== 0)
+    if (!_scaleId) _scaleId = actives[0]?.id || null
+    _scaleMeta = actives.find((s) => s.id === _scaleId) || actives[0] || null
 
     const canWeigh = ['pending', 'in_progress', 'paused'].includes(process.status)
     const { done, total } = weighCounts(process, weighings)
     const stage = processStage(process, { inWeighing: true })
     const [cls, label] = stageBadge(stage, process.status)
     const allWeighed = total > 0 && done >= total
-    const canConfirm = canWeigh && total > 0 && !allWeighed
     const canStartDye = canWeigh && allWeighed && process.status !== 'in_progress'
 
     container.innerHTML = `
@@ -124,15 +140,18 @@ async function renderWeighingPanel(container, processId) {
           ${renderStepper(stage)}
         </article>
 
+        ${canWeigh ? scaleCardHtml(actives) : ''}
+
         <article class="proc-card">
           ${weighings.length ? `
-            <div class="proc-weigh weigh-list">
+            <p class="form-hint weigh-capture-hint">La báscula debe marcar exactamente la cantidad de la receta. Sin % de tolerancia no se acepta de más ni de menos.</p>
+            <div class="proc-weigh weigh-list" id="weigh-list">
               ${weighings.map((w) => weighRow(w, canWeigh)).join('')}
             </div>
             <div class="weigh-list-footer">
               <p class="proc-weigh-count" id="weighing-progress">${done} de ${total} pesados</p>
-              ${canWeigh && total > 0 && (canConfirm || canStartDye) ? `
-                <button type="button" class="btn btn-primary" id="btn-confirm-weigh" disabled>
+              ${canWeigh && total > 0 && (!allWeighed || canStartDye) ? `
+                <button type="button" class="btn btn-primary" id="btn-confirm-weigh" ${allWeighed ? '' : 'disabled'}>
                   Confirmar pesaje e iniciar tiñendo
                 </button>` : ''}
             </div>
@@ -143,27 +162,6 @@ async function renderWeighingPanel(container, processId) {
             </footer>
           `}
         </article>
-
-        ${canWeigh ? `
-          <details class="card weigh-scale">
-            <summary>Báscula (opcional)</summary>
-            <div class="weigh-scale-body">
-              <div class="weigh-scale-toolbar">
-                <select id="scale-select" class="form-select">
-                  <option value="">Sin báscula</option>
-                  ${scaleList.map((s) => `<option value="${s.id}" ${s.id === _scaleId ? 'selected' : ''}>${esc(s.name)} (${esc(s.port)})</option>`).join('')}
-                </select>
-                <button type="button" class="btn btn-ghost btn-sm" id="btn-connect-scale">Conectar</button>
-              </div>
-              <div class="weight-display" id="weight-display">
-                <div class="weight-value" id="weight-value">---</div>
-                <div class="weight-unit">kg</div>
-                <div class="weight-status" id="weight-status">Sin conexión</div>
-              </div>
-              <div id="ws-status" class="form-hint">WebSocket desconectado</div>
-            </div>
-          </details>
-        ` : ''}
 
         ${process.status === 'in_progress' && allWeighed ? `
           <footer class="proc-card-actions">
@@ -185,84 +183,255 @@ async function renderWeighingPanel(container, processId) {
       </div>
     `
 
-    bindWeighChecks(container, weighings, canWeigh)
+    bindCaptureButtons(process, processId, weighings, canWeigh)
     const confirmBtn = document.getElementById('btn-confirm-weigh')
-    if (confirmBtn) {
-      confirmBtn.onclick = () => confirmWeighAndStart(process, weighings, processId)
-      syncConfirmButton(weighings)
-    }
+    if (confirmBtn) confirmBtn.onclick = () => confirmWeighAndStart(process, weighings, processId)
     document.getElementById('btn-back-processes')?.addEventListener('click', () => navigate('processes'))
-    setupScaleControls()
+    setupScaleControls(actives)
     setupProcessActions(process, processId)
+    paintLiveWeight()
+    syncCaptureButtons()
   } catch (err) {
     container.innerHTML = `<div class="empty-state"><p>${err.message}</p></div>`
   }
 }
 
-function weighRow(w, canWeigh) {
-  const weighed = isWeighed(w)
+function scaleCardHtml(scaleList) {
+  if (!scaleList.length) {
+    return `
+      <article class="proc-card weigh-scale-card">
+        <p class="proc-weigh-empty">No hay básculas registradas. En Máquinas → Básculas agrega el puerto COM para poder pesar.</p>
+      </article>`
+  }
   return `
-    <label class="proc-weigh-row ${weighed ? 'is-done' : ''}">
-      <div>
-        <strong>${esc(w.chemical_name)}</strong>
-        <span>${esc(lotLine(w))}</span>
+    <article class="proc-card weigh-scale-card">
+      <header class="proc-card-top">
+        <div>
+          <p class="proc-card-code" style="font-size:15px">Báscula</p>
+          <p class="proc-card-meta">El pesaje usa esta lectura, no el valor de la receta</p>
+        </div>
+      </header>
+      <div class="weigh-scale-body">
+        <div class="weigh-scale-toolbar">
+          <select id="scale-select" class="form-select">
+            ${scaleList.map((s) => `<option value="${s.id}" ${s.id === _scaleId ? 'selected' : ''}>${esc(s.name)} (${esc(s.port || 'sin puerto')})</option>`).join('')}
+          </select>
+          <button type="button" class="btn ${_live.connected ? 'btn-secondary' : 'btn-primary'} btn-sm" id="btn-connect-scale">
+            ${_live.connected ? 'Desconectar' : 'Conectar'}
+          </button>
+        </div>
+        <div class="weight-display" id="weight-display">
+          <div class="weight-value" id="weight-value">${_live.weight == null ? '---' : esc(fmtWeight(_live.weight, scaleUnit()))}</div>
+          <div class="weight-status" id="weight-status">${_live.connected ? (_live.stable ? 'ESTABLE' : 'Estabilizando...') : 'Sin conexión'}</div>
+        </div>
+        <div id="ws-status" class="form-hint">${_live.connected ? `Conectado · ${_live.port || _scaleMeta?.port || ''}` : 'Sin conexión a la báscula'}</div>
+        <p class="form-hint" id="weigh-target-line"></p>
       </div>
-      <em>${esc(fmtQty(w.expected_quantity, w.unit))}</em>
-      <input type="checkbox" class="weigh-check" data-wid="${w.id}"
-        ${weighed ? 'checked disabled' : ''}
-        ${!canWeigh && !weighed ? 'disabled' : ''}
-        aria-label="Marcar ${esc(w.chemical_name)} como pesado">
-    </label>`
+    </article>`
 }
 
-function bindWeighChecks(container, weighings, canWeigh) {
+function scaleUnit() {
+  return _live.unit || _scaleMeta?.unit || 'kg'
+}
+
+function fmtWeight(qty, unit) {
+  const u = normalizeUnit(unit)
+  const num = Number(qty)
+  if (!Number.isFinite(num)) return '—'
+  if (u === 'g') {
+    return `${Math.round(num).toLocaleString('es-CO')} g`
+  }
+  const rounded = Math.round(num * 10) / 10
+  const digits = Math.abs(rounded - Math.round(rounded)) < 0.05 ? 0 : 1
+  return `${rounded.toLocaleString('es-CO', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: 1,
+  })} kg`
+}
+
+function mismatchMessage(w) {
+  const now = _live.weight == null
+    ? 'sin lectura'
+    : fmtWeight(_live.weight, scaleUnit())
+  return `La receta pide ${fmtWeight(w.expected_quantity, w.unit)}. La báscula marca ${now}. El botón se activa solo cuando coinciden.`
+}
+
+function round3(n) {
+  return Math.round(Number(n) * 1000) / 1000
+}
+
+function targetOnScale(w) {
+  return convertWeight(Number(w.expected_quantity), w.unit, scaleUnit())
+}
+
+function readingMatches(w) {
+  if (!(_live.weight > 0) || !Number.isFinite(_live.weight)) return false
+  const target = targetOnScale(w)
+  if (!Number.isFinite(target) || target <= 0) return false
+  const tol = Number(w.tolerance_percentage)
+  const pct = Number.isFinite(tol) && tol > 0 ? tol : 0
+  if (pct <= 0) return round3(_live.weight) === round3(target)
+  return Math.abs(_live.weight - target) / target * 100 <= pct
+}
+
+function weighRow(w, canWeigh) {
+  const weighed = isWeighed(w)
+  const actual = weighed ? fmtWeight(w.actual_quantity, w.unit) : '—'
+  return `
+    <div class="proc-weigh-row ${weighed ? 'is-done' : ''}">
+      <div>
+        <strong>${esc(w.chemical_name)}</strong>
+        <span>${esc(lotLine(w))}${weighed && w.notes ? ` · ${esc(w.notes)}` : ''}</span>
+        ${!weighed ? `<span>Pesar ${esc(fmtWeight(w.expected_quantity, w.unit))}</span>` : ''}
+      </div>
+      <em title="Esperado según receta">${esc(fmtWeight(w.expected_quantity, w.unit))}</em>
+      <span class="weigh-actual ${weighed ? 'is-on' : ''}" title="Peso capturado">${esc(actual)}</span>
+      ${canWeigh && !weighed
+        ? `<button type="button" class="btn btn-primary btn-sm weigh-capture is-blocked" data-wid="${w.id}">Capturar peso</button>`
+        : ''}
+      <input type="checkbox" class="weigh-check" disabled ${weighed ? 'checked' : ''}
+        aria-label="${esc(w.chemical_name)} ${weighed ? 'pesado' : 'pendiente'}">
+    </div>`
+}
+
+function bindCaptureButtons(process, processId, weighings, canWeigh) {
   if (!canWeigh) return
-  container.querySelectorAll('.weigh-check').forEach((box) => {
-    box.addEventListener('change', () => syncConfirmButton(weighings))
+  document.querySelectorAll('.weigh-capture').forEach((btn) => {
+    btn.onclick = () => {
+      const w = weighings.find((item) => item.id === Number(btn.dataset.wid))
+      if (w) captureFromScale(w, process, processId)
+    }
   })
 }
 
-function syncConfirmButton(weighings) {
-  const btn = document.getElementById('btn-confirm-weigh')
-  const progress = document.getElementById('weighing-progress')
-  if (!btn) return
-  const checked = new Set(
-    [...document.querySelectorAll('.weigh-check:checked')].map((el) => Number(el.dataset.wid))
-  )
-  const marked = weighings.filter((w) => isWeighed(w) || checked.has(w.id)).length
-  if (progress) progress.textContent = `${marked} de ${weighings.length} pesados`
-  btn.disabled = marked < weighings.length || weighings.length === 0
+function normalizeUnit(unit) {
+  const v = String(unit || 'kg').trim().toLowerCase()
+  if (['g', 'gr', 'gramo', 'gramos'].includes(v)) return 'g'
+  if (['kg', 'kgs', 'kilo', 'kilos', 'kilogramo', 'kilogramos'].includes(v)) return 'kg'
+  return v
 }
 
-function currentScaleWeight() {
-  const raw = document.getElementById('weight-value')?.textContent
-  const value = parseFloat(String(raw || '').replace(',', '.'))
-  return Number.isFinite(value) && value > 0 ? value : null
+function convertWeight(weight, fromUnit, toUnit) {
+  const from = normalizeUnit(fromUnit)
+  const to = normalizeUnit(toUnit)
+  if (from === to) return weight
+  if (from === 'g' && to === 'kg') return weight / 1000
+  if (from === 'kg' && to === 'g') return weight * 1000
+  return weight
 }
 
-async function confirmWeighAndStart(process, weighings, processId) {
-  const btn = document.getElementById('btn-confirm-weigh')
-  const checked = new Set(
-    [...document.querySelectorAll('.weigh-check:checked')].map((el) => Number(el.dataset.wid))
-  )
-  const pending = weighings.filter((w) => !isWeighed(w))
-  if (pending.some((w) => !checked.has(w.id))) {
-    toast.warning('Marca todos los químicos de la receta para confirmar el pesaje')
+function paintLiveWeight() {
+  const valueEl  = document.getElementById('weight-value')
+  const statusEl = document.getElementById('weight-status')
+  const wsEl     = document.getElementById('ws-status')
+  const btn      = document.getElementById('btn-connect-scale')
+  if (!valueEl) return
+
+  if (_live.connected && _live.weight != null && Number.isFinite(_live.weight)) {
+    valueEl.textContent = fmtWeight(_live.weight, scaleUnit())
+  } else if (!_live.connected) {
+    valueEl.textContent = '---'
+  }
+
+  if (statusEl) {
+    if (!_live.connected) {
+      statusEl.textContent = 'Sin conexión'
+      statusEl.className = 'weight-status'
+    } else {
+      statusEl.textContent = _live.stable ? 'ESTABLE' : 'Estabilizando...'
+      statusEl.className = `weight-status ${_live.stable ? 'stable' : 'unstable'}`
+    }
+  }
+  if (wsEl) {
+    wsEl.textContent = _live.connected
+      ? `Conectado · ${_live.port || _scaleMeta?.port || ''}`
+      : 'Sin conexión a la báscula'
+  }
+  if (btn) {
+    btn.textContent = _live.connected ? 'Desconectar' : 'Conectar'
+    btn.className = `btn ${_live.connected ? 'btn-secondary' : 'btn-primary'} btn-sm`
+  }
+  syncCaptureButtons()
+}
+
+function syncCaptureButtons() {
+  const unit = scaleUnit()
+  const pending = _weighings.filter((w) => !isWeighed(w))
+  const focus = pending[0]
+  const targetEl = document.getElementById('weigh-target-line')
+  if (targetEl) {
+    if (!_live.connected) {
+      targetEl.textContent = 'Conecta la báscula para ver el peso objetivo.'
+    } else if (!focus) {
+      targetEl.textContent = 'Todos los químicos ya tienen peso capturado.'
+    } else {
+      const now = _live.weight == null ? '—' : fmtWeight(_live.weight, unit)
+      const ok = readingMatches(focus)
+      targetEl.textContent = ok
+        ? `Peso exacto: ${fmtWeight(focus.expected_quantity, focus.unit)}. Ya puedes capturar.`
+        : `Objetivo: ${fmtWeight(focus.expected_quantity, focus.unit)} · Ahora: ${now}. Aún no coinciden.`
+      targetEl.classList.toggle('is-warn', !ok)
+      targetEl.classList.toggle('is-ok', ok)
+    }
+  }
+
+  document.querySelectorAll('.weigh-capture').forEach((btn) => {
+    const w = _weighings.find((item) => item.id === Number(btn.dataset.wid))
+    if (!w) return
+    const ok = _live.connected && _live.stable && readingMatches(w)
+    btn.classList.toggle('is-blocked', !ok)
+    btn.title = ok ? 'Peso exacto. Capturar.' : mismatchMessage(w)
+  })
+}
+
+async function captureFromScale(w, process, processId) {
+  if (!_live.connected || !_ws) {
+    toast.warning('Conecta la báscula antes de capturar el peso')
+    return
+  }
+  if (!_live.stable) {
+    toast.warning('Espera a que la báscula esté ESTABLE')
+    return
+  }
+  if (!(_live.weight > 0)) {
+    toast.warning('La báscula está en cero. Coloca el químico y espera ESTABLE.')
+    return
+  }
+  if (!readingMatches(w)) {
+    toast.warning(mismatchMessage(w))
     return
   }
 
-  btn.disabled = true
-  btn.textContent = 'Confirmando...'
-  const scaleWeight = currentScaleWeight()
+  const actual = convertWeight(_live.weight, scaleUnit(), w.unit)
+  const btn = document.querySelector(`.weigh-capture[data-wid="${w.id}"]`)
+  if (btn) { btn.disabled = true; btn.textContent = 'Capturando...' }
 
   try {
-    for (const w of pending) {
-      await api.updateWeighing(process.id, w.id, {
-        actual_quantity: scaleWeight && pending.length === 1 ? scaleWeight : w.expected_quantity,
-        lot_id: w.lot_id || w.suggested_lot_id || undefined,
-        scale_id: _scaleId || undefined,
-      })
-    }
+    await api.updateWeighing(process.id, w.id, {
+      actual_quantity: actual,
+      lot_id: w.lot_id || w.suggested_lot_id || undefined,
+      scale_id: _scaleId || undefined,
+      notes: `lectura ${_live.weight} ${_live.unit || _scaleMeta?.unit || ''}`.trim(),
+    })
+    toast.success(`Capturado ${fmtWeight(actual, w.unit)} de ${w.chemical_name}`)
+    await renderWeighingPanel(document.getElementById('weighing-content'), processId)
+  } catch (err) {
+    toast.error(err.message)
+    if (btn) { btn.disabled = false; btn.textContent = 'Capturar peso' }
+  }
+}
+
+async function confirmWeighAndStart(process, weighings, processId) {
+  const pending = weighings.filter((w) => !isWeighed(w))
+  if (pending.length) {
+    toast.warning('Captura el peso de todos los químicos con la báscula')
+    return
+  }
+
+  const btn = document.getElementById('btn-confirm-weigh')
+  if (btn) { btn.disabled = true; btn.textContent = 'Confirmando...' }
+
+  try {
     if (process.status !== 'in_progress') {
       await api.updateStatus(process.id, { status: 'in_progress' })
     }
@@ -270,58 +439,75 @@ async function confirmWeighAndStart(process, weighings, processId) {
     await renderWeighingPanel(document.getElementById('weighing-content'), processId)
   } catch (err) {
     toast.error(err.message)
-    btn.disabled = false
-    btn.textContent = 'Confirmar pesaje e iniciar tiñendo'
+    if (btn) { btn.disabled = false; btn.textContent = 'Confirmar pesaje e iniciar tiñendo' }
   }
 }
 
-function setupScaleControls() {
+function setupScaleControls(scaleList) {
   const connectBtn  = document.getElementById('btn-connect-scale')
   const scaleSelect = document.getElementById('scale-select')
-  if (!connectBtn) return
+  if (!connectBtn || !scaleSelect) return
+
+  scaleSelect.onchange = () => {
+    _scaleId = parseInt(scaleSelect.value, 10) || null
+    _scaleMeta = scaleList.find((s) => s.id === _scaleId) || null
+    if (_ws) {
+      closeScaleSocket()
+      paintLiveWeight()
+    }
+  }
 
   connectBtn.onclick = () => {
     const id = parseInt(scaleSelect.value, 10)
     if (!id) { toast.warning('Selecciona una báscula'); return }
 
     if (_ws) {
-      _ws.close()
-      _ws = null
-      connectBtn.textContent = 'Conectar'
-      const status = document.getElementById('ws-status')
-      if (status) status.textContent = 'Desconectado'
+      closeScaleSocket()
+      paintLiveWeight()
       return
     }
 
-    connectBtn.textContent = 'Conectando...'
     _scaleId = id
-    connectScale(id, connectBtn)
+    _scaleMeta = scaleList.find((s) => s.id === id) || null
+    connectBtn.textContent = 'Conectando...'
+    connectScale(id)
   }
 }
 
-function connectScale(scaleId, btn) {
-  const weightValueEl  = document.getElementById('weight-value')
-  const weightStatusEl = document.getElementById('weight-status')
-  const wsStatusEl     = document.getElementById('ws-status')
-
+function connectScale(scaleId) {
+  _closing = false
+  const wsStatusEl = document.getElementById('ws-status')
   if (wsStatusEl) wsStatusEl.textContent = 'Conectando...'
 
   _ws = openScaleSocket(
     scaleId,
     (data) => {
-      if (weightValueEl) weightValueEl.textContent = Number(data.weight).toFixed(3)
-      if (weightStatusEl) {
-        weightStatusEl.textContent = data.stable ? 'ESTABLE' : 'Estabilizando...'
-        weightStatusEl.className = `weight-status ${data.stable ? 'stable' : 'unstable'}`
+      if (data?.error) {
+        toast.error(data.error)
+        closeScaleSocket()
+        paintLiveWeight()
+        return
       }
-      if (wsStatusEl) wsStatusEl.textContent = `Conectado · Puerto: ${data.port || scaleId}`
-      if (btn) btn.textContent = 'Desconectar'
+      _live.connected = true
+      _live.weight = Number(data.weight)
+      _live.stable = Boolean(data.stable)
+      _live.unit = data.unit || _scaleMeta?.unit || 'kg'
+      _live.port = _scaleMeta?.port || ''
+      paintLiveWeight()
     },
     (err) => {
-      if (weightStatusEl) { weightStatusEl.textContent = 'Sin conexión'; weightStatusEl.className = 'weight-status' }
-      if (wsStatusEl) wsStatusEl.textContent = `Error: ${err.message || 'Conexión perdida'}`
-      if (btn) btn.textContent = 'Reconectar'
+      if (_closing) {
+        _closing = false
+        return
+      }
       _ws = null
+      _live.connected = false
+      _live.stable = false
+      paintLiveWeight()
+      const wsEl = document.getElementById('ws-status')
+      if (wsEl) wsEl.textContent = `Error: ${err.message || 'Conexión perdida'}`
+      const btn = document.getElementById('btn-connect-scale')
+      if (btn) btn.textContent = 'Reconectar'
     }
   )
 }

@@ -115,9 +115,95 @@ def normalize_status(value: str) -> str:
     return aliases.get(text, text or "pendiente")
 
 
+_ITEM_RESUMEN = re.compile(
+    r"^(?P<code>[A-Za-z]{0,3}\d{4,})\s*(?:[-–]\s*)?(?P<name>.+)$"
+)
+
+
 def _looks_header(row: list[str]) -> bool:
     joined = " ".join(row).lower()
     return "bodega" in joined or "nro solic" in joined or "nro orden" in joined
+
+
+def _looks_inv_header(row: list[str]) -> bool:
+    joined = " ".join(row).lower()
+    return "item resumen" in joined or "peso en kg" in joined
+
+
+def split_item_resumen(value: str) -> tuple[str, str]:
+    """'0037406 IGUALADOR PAC' o 'QP480109 SARABID LDR NEW-C' → codigo, nombre."""
+    raw = " ".join((value or "").split())
+    match = _ITEM_RESUMEN.match(raw)
+    if not match:
+        return "", raw
+    code = match.group("code")
+    if not code.isdigit():
+        code = code.upper()
+    return _pad_item(code), match.group("name").strip(" -")
+
+
+def normalize_lot(value: str) -> str:
+    text = " ".join((value or "").split())
+    if not text or text.upper() in ("S/N", "S.N", "S.N.", "SN", "SIN LOTE", "N/A"):
+        return "S/N"
+    return text
+
+
+def parse_inv_file(raw: bytes) -> dict:
+    """Informe de bodega SIESA: item, kilos y lote. Sin precios."""
+    rows = parse_rows(raw)
+    imported: list[dict] = []
+    skipped = 0
+    other_warehouse = 0
+    errors: list[str] = []
+
+    for i, row in enumerate(rows, start=1):
+        if i == 1 and _looks_inv_header(row):
+            continue
+        resumen = _get(row, 0)
+        if not resumen or resumen.lower().startswith("gran total"):
+            skipped += 1
+            continue
+        try:
+            record = _parse_inv_row(row)
+        except Exception as exc:
+            errors.append(f"Fila {i}: {exc}")
+            continue
+        if record["warehouse"] and record["warehouse"] != WAREHOUSE:
+            other_warehouse += 1
+            continue
+        if not record["item_code"] or record["qty"] <= 0:
+            skipped += 1
+            continue
+        imported.append(record)
+
+    return {
+        "kind": "inv",
+        "rows": imported,
+        "skipped": skipped,
+        "other_warehouse": other_warehouse,
+        "errors": errors,
+    }
+
+
+def _parse_inv_row(row: list[str]) -> dict:
+    code, name = split_item_resumen(_get(row, 0))
+    if not code:
+        raise ValueError("sin codigo de item")
+    warehouse = _get(row, 1) or WAREHOUSE
+    unit = _get(row, 2).replace(" ", "") or "KG"
+    qty, index = consume_co_number(row, 3)
+    lot = normalize_lot(_get(row, index))
+    line = _get(row, index + 1)
+    return {
+        "warehouse": warehouse,
+        "item_code": code,
+        "item_name": name,
+        "unit": unit,
+        "qty": qty,
+        "lot_number": lot,
+        "line": line,
+    }
 
 
 def parse_soc_file(raw: bytes) -> dict:

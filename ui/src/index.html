@@ -72,15 +72,15 @@
 
         <div class="nav-section">Laboratorio</div>
 
-        <a href="#" class="nav-item" data-view="chemicals">
+        <a href="#" class="nav-item" data-view="stock">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3v11l-3 3h12l-3-3V3"/><path d="M6 3h12"/><circle cx="12" cy="17" r="1"/></svg>
-          <span>Productos</span>
+          <span>Inventario</span>
           <span id="badge-low-stock" class="nav-badge" style="display:none"></span>
         </a>
 
-        <a href="#" class="nav-item" data-view="stock">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
-          <span>Inventario</span>
+        <a href="#" class="nav-item" data-view="lab">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3h6"/><path d="M10 3v6.2L5.5 19a2 2 0 0 0 1.8 2.8h9.4a2 2 0 0 0 1.8-2.8L14 9.2V3"/><path d="M8.5 14h7"/></svg>
+          <span>Inventario lab</span>
         </a>
 
         <a href="#" class="nav-item" data-view="requests">
@@ -125,16 +125,15 @@
         </a>
       </nav>
 
+      <div class="sidebar-version">
+        <span class="sidebar-version-full" data-app-version></span>
+        <span class="sidebar-version-short" data-app-version-short></span>
+      </div>
+
       <div class="sidebar-footer">
-        <div class="user-info">
-          <div class="user-avatar" id="user-avatar">A</div>
-          <div class="user-details">
-            <span class="user-name" id="user-name">Cargando...</span>
-            <span class="user-role" id="user-role"></span>
-          </div>
-        </div>
-        <button class="btn-logout" id="btn-logout" title="Cerrar sesion">
+        <button class="btn-logout" id="btn-logout" data-label="Cerrar sesión" aria-label="Cerrar sesión">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>Cerrar sesión</span>
         </button>
       </div>
     </aside>
@@ -158,7 +157,6 @@
         </div>
       </header>
       <div id="view-container" class="view-container"></div>
-      <div class="app-version-chip" id="app-version-chip" data-app-version hidden></div>
     </main>
 
   </div>

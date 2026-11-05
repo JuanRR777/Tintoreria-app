@@ -1,13 +1,11 @@
 import { requests as api, peekCache } from '../api.js'
 import { showError, showLoading, showSuccess, showWarning } from '../components/swal.js'
 import { setPageHeader } from '../layout.js'
-import { closeFloatList, isFloatListOpen, openFloatList, updateFloatList } from '../components/float-list.js'
+import { closeFloatList } from '../components/float-list.js'
 
 const WAREHOUSE = '10502'
-const ITEMS_PER_PAGE = 3
-
 const ICON_CHECK = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg>`
-const ICON_CHEVRON = `<svg class="req-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>`
+const ICON_CHEVRON = `<svg class="req-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>`
 
 export async function showView(container) {
   setPageHeader({
@@ -84,7 +82,6 @@ export async function showView(container) {
 
   let filter = 'all'
   let cache = { soc: [], occ: [] }
-  const pageById = new Map()
   const search = document.getElementById('search-requests')
   const chips = container.querySelectorAll('#request-filters [data-filter]')
 
@@ -99,8 +96,9 @@ export async function showView(container) {
       }),
     )
     closeFloatList()
+    closeReqDrawer()
     renderCards(groups)
-    bindToggles(groups, pageById)
+    bindToggles(groups)
   }
 
   chips.forEach((btn) => {
@@ -215,6 +213,7 @@ export async function showView(container) {
 
   await loadData(cache)
   paint()
+  return closeReqDrawer
 }
 
 async function loadData(cache, { fresh = false } = {}) {
@@ -452,60 +451,129 @@ function renderCards(groups) {
     </div>`
 }
 
-function pageState(group, pageById) {
-  const totalPages = Math.max(1, Math.ceil(group.items.length / ITEMS_PER_PAGE))
-  let page = pageById.get(group.id) || 1
-  if (page > totalPages) page = totalPages
-  if (page < 1) page = 1
-  pageById.set(group.id, page)
-  const start = (page - 1) * ITEMS_PER_PAGE
-  return { page, totalPages, start, slice: group.items.slice(start, start + ITEMS_PER_PAGE) }
+const REQ_STAGE = {
+  espera: { label: 'En espera', tone: 'warning' },
+  pedido: { label: 'Pedido', tone: 'accent' },
+  cumplido: { label: 'Cumplido', tone: 'success' },
+  sin_soc: { label: 'Sin SOC', tone: 'muted' },
 }
 
-function bindToggles(groups, pageById) {
+function bindToggles(groups) {
   const byId = new Map(groups.map((g) => [String(g.id), g]))
   document.querySelectorAll('[data-req-toggle]').forEach((btn) => {
     btn.onclick = (e) => {
       e.stopPropagation()
-      if (isFloatListOpen(btn)) {
-        closeFloatList()
-        return
-      }
       const group = byId.get(String(btn.dataset.reqToggle))
-      if (!group) return
-      if (!pageById.has(group.id)) pageById.set(group.id, 1)
-      showReqItems(btn, group, pageById)
+      if (group) openReqDrawer(group)
     }
   })
 }
 
-function reqItemsHtml(group, pageById) {
-  const { page, totalPages, slice } = pageState(group, pageById)
+let _reqDrawer = null
+
+function closeReqDrawer() {
+  if (!_reqDrawer) return
+  document.removeEventListener('keydown', _reqDrawer.onKey)
+  _reqDrawer.root.remove()
+  _reqDrawer = null
+}
+
+function reqDrawerRow(item) {
+  const waiting = !item.occ.length
+  const occ = item.occ[0]
+  const extraOcc = item.occ.length > 1 ? ` +${item.occ.length - 1}` : ''
+  const unit = item.unit || 'KG'
+  const net = sum(item.occ.map((row) => row.net_value))
   return `
-    <ul class="req-items">${renderItemSlice(slice)}</ul>
-    <div class="req-pager ${totalPages > 1 ? '' : 'is-disabled'}">
-      <button type="button" class="req-pager-btn" data-id="${esc(group.id)}" data-req-dir="-1" ${page <= 1 ? 'disabled' : ''} aria-label="Anterior">‹</button>
-      <span>${page} / ${totalPages}</span>
-      <button type="button" class="req-pager-btn" data-id="${esc(group.id)}" data-req-dir="1" ${page >= totalPages ? 'disabled' : ''} aria-label="Siguiente">›</button>
-    </div>`
+    <li class="rq-row ${waiting ? 'is-wait' : 'is-ok'}">
+      <div class="rq-prod">
+        <b>${esc(item.name || '—')}</b>
+        <span class="rq-meta">
+          <code>${esc(item.code || '—')}</code>
+          ${item.detail ? `<span class="rq-cat">${esc(item.detail)}</span>` : ''}
+          ${occ ? `<span class="rq-cat">${esc(occ.occ_number)}${esc(extraOcc)}</span>` : '<span class="rq-flag">Sin OCC</span>'}
+        </span>
+        ${occ && (occ.supplier || occ.unit_price) ? `
+          <span class="rq-meta">
+            ${occ.supplier ? `<span>${esc(short(occ.supplier, 34))}</span>` : ''}
+            ${occ.unit_price ? `<span>Unitario ${esc(fmtPesos(occ.unit_price))} / ${esc(unit)}</span>` : ''}
+          </span>` : ''}
+      </div>
+      <div class="rq-dose">
+        ${esc(fmtQty(item.qtyRequested || item.qtyOrdered))} ${esc(unit)}
+        ${net ? `<small class="rq-dose-sub">${esc(fmtPesos(net))}</small>` : ''}
+      </div>
+    </li>`
 }
 
-function bindReqFloat(panel, btn, group, pageById) {
-  panel.querySelectorAll('[data-req-dir]').forEach((el) => {
-    el.onclick = (e) => {
-      e.stopPropagation()
-      const { page, totalPages } = pageState(group, pageById)
-      pageById.set(group.id, Math.min(totalPages, Math.max(1, page + Number(el.dataset.reqDir))))
-      showReqItems(btn, group, pageById)
-    }
-  })
+function reqDrawerSection(title, items, index, tone) {
+  if (!items.length) return ''
+  const qty = sum(items.map((i) => i.qtyRequested || i.qtyOrdered))
+  const unit = items[0]?.unit || 'KG'
+  return `
+    <section class="rq-stage is-${tone}">
+      <div class="rq-stage-h"><i>${index}</i><h4>${esc(title)}</h4><span>${esc(fmtQty(qty))} ${esc(unit)} · ${items.length} ítem${items.length === 1 ? '' : 's'}</span></div>
+      <ul class="rq-list">${items.map(reqDrawerRow).join('')}</ul>
+    </section>`
 }
 
-function showReqItems(btn, group, pageById) {
-  const html = reqItemsHtml(group, pageById)
-  const opts = { onBind: (panel) => bindReqFloat(panel, btn, group, pageById) }
-  if (isFloatListOpen(btn)) updateFloatList(html, opts)
-  else openFloatList(btn, html, opts)
+function openReqDrawer(g) {
+  closeFloatList()
+  closeReqDrawer()
+  const stage = REQ_STAGE[g.stage] || REQ_STAGE.espera
+  const party = g.suppliers[0] || g.requesters[0] || 'Sin proveedor'
+  const unit = g.unit || 'KG'
+  const waiting = g.items.filter((i) => !i.occ.length)
+  const linked = g.items.filter((i) => i.occ.length)
+  const facts = [
+    ['Solicitado', `${fmtQty(g.qtyTotal || g.qtyOrdered)} ${unit}`],
+    ['Con OCC', `${fmtQty(g.qtyWithOcc)} ${unit}`],
+    ['Surtido', `${g.progress}%`],
+    ['Neto', fmtNeto(g.netValue)],
+  ]
+  const docs = [g.soc_number, ...g.occNumbers].filter(Boolean)
+  const sections = [
+    reqDrawerSection('En espera de OCC', waiting, 1, 'warning'),
+    reqDrawerSection('Con OCC', linked, waiting.length ? 2 : 1, 'success'),
+  ].join('')
+  const dates = [
+    g.createdSoc && `SOC creada ${formatDate(g.createdSoc)}`,
+    g.approvedSoc && `aprobada ${formatDate(g.approvedSoc)}`,
+    g.createdOcc && `OCC ${formatDate(g.createdOcc)}`,
+  ].filter(Boolean).join(' · ')
+
+  const root = document.createElement('div')
+  root.className = 'rq-root'
+  root.innerHTML = `
+    <div class="rq-scrim"></div>
+    <aside class="rq-drawer" role="dialog" aria-modal="true" aria-labelledby="rq-title-req">
+      <div class="rq-header">
+        <div>
+          <h3 id="rq-title-req">Ítems<span>${esc(g.title)}</span></h3>
+          <p>${esc([party, `${g.items.length} ítem${g.items.length === 1 ? '' : 's'}`, docs.length > 1 ? docs.join(' · ') : ''].filter(Boolean).join(' · '))}</p>
+        </div>
+        <span class="rc-status is-${stage.tone}"><i></i>${stage.label}</span>
+        <button class="rq-close" type="button" aria-label="Cerrar">×</button>
+      </div>
+      <div class="rq-scroll">
+        <dl class="rq-facts">
+          ${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}
+        </dl>
+        <div class="rq-cols"><span>Producto</span><span>Cantidad</span></div>
+        <div class="rq-body">
+          ${sections || '<p class="wiz-stage-empty">Sin ítems.</p>'}
+        </div>
+      </div>
+      <div class="rq-foot">
+        <span class="rq-dates">${esc(dates || 'Sin fechas registradas')}</span>
+      </div>
+    </aside>`
+  document.body.appendChild(root)
+  const onKey = (e) => { if (e.key === 'Escape') closeReqDrawer() }
+  document.addEventListener('keydown', onKey)
+  _reqDrawer = { root, onKey }
+  root.querySelector('.rq-scrim').onclick = closeReqDrawer
+  root.querySelector('.rq-close').onclick = closeReqDrawer
 }
 
 function buildStepper(g) {
@@ -626,44 +694,6 @@ function requestCard(g) {
         ${ICON_CHEVRON}
       </button>
     </article>`
-}
-
-function renderItemSlice(slice) {
-  let lastKind = null
-  return slice.map((item) => {
-    const waiting = !item.occ.length
-    const kind = waiting ? 'wait' : 'ok'
-    const heading = kind !== lastKind
-      ? `<li class="req-item-group is-${kind}">${waiting ? 'En espera de OCC' : 'Con OCC'}</li>`
-      : ''
-    lastKind = kind
-    return `${heading}${itemRow(item, waiting)}`
-  }).join('')
-}
-
-function itemRow(item, waiting = !item.occ.length) {
-  const occ = item.occ[0]
-  const extraOcc = item.occ.length > 1 ? ` +${item.occ.length - 1}` : ''
-  const heading = occ
-    ? `<div class="req-item-occ">${esc(occ.occ_number)}${esc(extraOcc)}${occ.supplier ? ` · ${esc(short(occ.supplier, 32))}` : ''}</div>`
-    : ''
-  const unitPrice = occ && occ.unit_price
-    ? `<div class="req-item-unit">Unitario ${fmtPesos(occ.unit_price)} / ${esc(item.unit || 'KG')}</div>`
-    : ''
-  const net = occ && occ.net_value
-    ? `<div class="req-item-price">${fmtPesos(occ.net_value)}</div>`
-    : ''
-  return `
-    <li class="req-item ${waiting ? 'is-wait' : 'is-ok'}">
-      ${heading}
-      <div class="req-item-main">
-        <strong class="req-item-name">${esc(item.name || '—')}</strong>
-        <span class="req-item-qty">${fmtQty(item.qtyRequested || item.qtyOrdered)} ${esc(item.unit || 'KG')}</span>
-      </div>
-      <div class="req-item-code">${esc(item.code || '—')}</div>
-      ${unitPrice}
-      ${net}
-    </li>`
 }
 
 function unique(values) {

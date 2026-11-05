@@ -46,6 +46,16 @@ export function fmtQty(n, unit = 'kg') {
   return `${text} ${unit || 'kg'}`
 }
 
+export function fmtExactQty(n, unit = 'kg') {
+  const num = Number(n)
+  if (!Number.isFinite(num)) return `— ${unit || 'kg'}`
+  const text = num.toLocaleString('es-CO', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+  })
+  return `${text} ${unit || 'kg'}`
+}
+
 export function lotLine(w) {
   const lot = w.lot_number || w.suggested_lot
   const exp = w.suggested_expiry

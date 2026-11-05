@@ -18,18 +18,26 @@ class RecipeStepCreate(BaseModel):
     temperature_c: Optional[float] = None
     ph_target: Optional[float] = None
     notes: Optional[str] = None
+    bath_stage: Optional[str] = None
 
 
 class RecipeIngredientCreate(BaseModel):
     step_id: Optional[int] = None
-    chemical_id: int
+    chemical_id: Optional[int] = None
+    temp_name: Optional[str] = None
     quantity_per_kg: float = Field(..., gt=0)
     unit: str
+    dose_basis: Optional[Literal["percent", "g_l", "per_kg"]] = None
+    dose_min: Optional[int] = None
     tolerance_percentage: float = 5
     is_critical: int = 0
     sort_order: int = 0
     notes: Optional[str] = None
     bath_stage: Optional[str] = None
+
+
+class IngredientLink(BaseModel):
+    chemical_id: int
 
 
 class RecipeCreate(BaseModel):
@@ -38,6 +46,10 @@ class RecipeCreate(BaseModel):
     fiber_type: Optional[FiberType] = None
     color_reference: Optional[str] = None
     color_name: Optional[str] = None
+    yarn_title: Optional[str] = None
+    commercial_ref: Optional[str] = None
+    color_depth: Optional[Literal["oscuros", "claros"]] = None
+    process_route: Optional[Literal["preblanqueo", "descrude"]] = None
     target_color_hex: Optional[str] = None
     bath_ratio_l_per_kg: Optional[float] = None
     temperature_c: Optional[float] = None
@@ -54,6 +66,10 @@ class RecipeUpdate(BaseModel):
     fiber_type: Optional[FiberType] = None
     color_reference: Optional[str] = None
     color_name: Optional[str] = None
+    yarn_title: Optional[str] = None
+    commercial_ref: Optional[str] = None
+    color_depth: Optional[Literal["oscuros", "claros"]] = None
+    process_route: Optional[Literal["preblanqueo", "descrude"]] = None
     target_color_hex: Optional[str] = None
     bath_ratio_l_per_kg: Optional[float] = None
     temperature_c: Optional[float] = None

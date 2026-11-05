@@ -2,6 +2,7 @@ import { processes as api, recipes, machines } from '../api.js'
 import { toast }   from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
 import { navigate } from '../router.js'
+import { openRecipeForm } from './recipes.js'
 import { setPageHeader } from '../layout.js'
 import {
   esc, fiberLabel, processMetaLine, processStage, renderStepper, weighCounts,
@@ -13,6 +14,26 @@ const STATUS_MAP = {
   paused:      ['badge-amber', 'Pausado'],
   completed:   ['badge-green', 'Terminado'],
   cancelled:   ['badge-red',   'Cancelado'],
+}
+
+function liquidateDose(ing, fiberKg, bathRatio) {
+  const value = Number(ing.quantity_per_kg || ing.qty || 0)
+  const basis = String(ing.dose_basis || '').trim()
+  const unit = String(ing.unit || '').trim().toLowerCase()
+  const fiber = Number(fiberKg) || 0
+  let qtyKg = 0
+  if (basis === 'percent' || unit === '%') {
+    qtyKg = fiber * value / 100
+  } else if (basis === 'g_l' || unit === 'g/l') {
+    if (!bathRatio) return 'falta relación de baño'
+    qtyKg = (value * Number(bathRatio) * fiber) / 1000
+  } else if (unit === 'g' || unit === 'gr') {
+    qtyKg = value * fiber / 1000
+  } else {
+    qtyKg = value * fiber
+  }
+  if (qtyKg < 1) return `${Number((qtyKg * 1000).toFixed(3))} g`
+  return `${Number(qtyKg.toFixed(3))} kg`
 }
 
 export async function showView(container, params = {}) {
@@ -194,20 +215,41 @@ async function openNewProcessForm(onSuccess) {
     }
 
     const color = recipe.color_name || recipe.color_reference || 'Sin definir'
-    const ratio = recipe.bath_ratio_l_per_kg
+    const recipeRatio = Number(recipe.bath_ratio_l_per_kg) || 0
+    const machineRatio = machine && Number(machine.capacity_kg) > 0 && Number(machine.water_capacity_liters) > 0
+      ? Number(machine.water_capacity_liters) / Number(machine.capacity_kg)
+      : 0
+    const ratio = machineRatio || recipeRatio
     const ings = recipe.ingredients || []
+    const temps = ings.filter((i) => Number(i.is_temporary) === 1)
+    const preview = (weight > 0 && ings.length)
+      ? ings.slice(0, 6).map((i) => {
+          const liq = liquidateDose(i, weight, ratio)
+          return `<span>${esc(i.chemical_name || i.name || 'Químico')}: <strong>${liq}</strong></span>`
+        }).join('')
+      : ''
     inherit.hidden = false
     inherit.innerHTML = `
+      ${recipe.commercial_ref ? `<span>Referencia: <strong>${esc(recipe.commercial_ref)}</strong></span>` : ''}
+      ${recipe.yarn_title ? `<span>Título: <strong>${esc(recipe.yarn_title)}</strong></span>` : ''}
       <span>Fibra: <strong>${esc(fiberLabel(recipe.fiber_type))}</strong></span>
+      ${recipe.process_path_label ? `<span>Ruta: <strong>${esc(recipe.process_path_label)}</strong></span>` : ''}
       <span>Color: <strong>${esc(color)}</strong></span>
-      <span>Relación de baño: <strong>${ratio ? `${esc(ratio)}:1` : '—'}</strong></span>
+      <span>Relación de baño: <strong>${ratio ? `${esc(Number(ratio.toFixed(1)))}:1` : '—'}</strong></span>
       <span>Químicos a pesar: <strong>${ings.length}</strong></span>
-      <small>Datos de la receta, no editables aquí</small>`
+      ${temps.length ? `<span class="pf-temp-warn">Sin inventario: <strong>${temps.map((i) => esc(i.chemical_name || i.name)).join(', ')}</strong>.</span><button type="button" class="btn btn-secondary btn-sm" id="pf-edit-recipe">Editar receta para asociar</button>` : ''}
+      ${preview}
+      <small>El % va sobre los kg del lote. Los g/L usan la relación de baño de la máquina.</small>`
+    document.getElementById('pf-edit-recipe')?.addEventListener('click', () => {
+      const id = Number(document.getElementById('pf-recipe').value)
+      closeModal()
+      openRecipeForm(id, null, { step: 1 })
+    })
 
     if (weight > 0 && ratio) {
-      waterHint.textContent = `Volumen de baño estimado: ${(ratio * weight).toFixed(1)} L (relación ${ratio}:1)`
+      waterHint.textContent = `Volumen de baño estimado: ${(ratio * weight).toFixed(1)} L (relación ${Number(ratio.toFixed(1))}:1)`
     } else if (weight > 0 && !ratio) {
-      waterHint.textContent = 'La receta no tiene relación de baño configurada'
+      waterHint.textContent = 'Falta relación de baño en la máquina'
     } else {
       waterHint.textContent = ''
     }
@@ -230,7 +272,7 @@ async function openNewProcessForm(onSuccess) {
       machineHint.textContent = issues.join(' · ')
     } else {
       machineHint.className = 'form-hint is-ok'
-      machineHint.textContent = 'Compatible con la relación de baño de la receta'
+      machineHint.textContent = 'Compatible con la capacidad de la máquina'
     }
   }
 
@@ -243,6 +285,13 @@ async function openNewProcessForm(onSuccess) {
 
     if (!recipeId || !weight || weight <= 0) {
       errEl.textContent = 'Receta y peso de fibra son obligatorios'
+      errEl.style.display = 'block'
+      return
+    }
+    const chosen = recipeList.find((r) => r.id === recipeId)
+    const temps = (chosen?.ingredients || []).filter((i) => Number(i.is_temporary) === 1)
+    if (temps.length) {
+      errEl.textContent = `Asocia estos productos temporales antes del proceso: ${temps.map((i) => i.chemical_name || i.name).join(', ')}`
       errEl.style.display = 'block'
       return
     }

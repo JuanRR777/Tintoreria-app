@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional
 
 
 class LoginRequest(BaseModel):
@@ -23,6 +23,7 @@ class UserOut(BaseModel):
     position: Optional[str] = None
     phone: Optional[str] = None
     is_active: int
+    idle_minutes: int = 30
 
 
 class LoginResponse(BaseModel):
@@ -33,17 +34,19 @@ class LoginResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6)
+    new_password: str = Field(..., min_length=8)
 
 
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     email: str
     full_name: str
-    password: str = Field(..., min_length=6)
+    password: str = Field(..., min_length=8)
     role_id: int = 1
     phone: Optional[str] = None
     position: Optional[str] = None
+    idle_minutes: int = 30
+    views: Optional[List[str]] = None
 
 
 class UserUpdate(BaseModel):
@@ -53,3 +56,6 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     position: Optional[str] = None
     is_active: Optional[int] = None
+    idle_minutes: Optional[int] = None
+    views: Optional[List[str]] = None
+    password: Optional[str] = Field(None, min_length=8)

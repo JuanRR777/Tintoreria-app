@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
     phone         TEXT,
     position      TEXT,
     is_active     INTEGER NOT NULL DEFAULT 1,
+    idle_minutes  INTEGER NOT NULL DEFAULT 30,
+    permissions   TEXT,
     last_login    TEXT,
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),

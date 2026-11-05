@@ -455,3 +455,123 @@ def apply_open_receipts(conn, user_id: int | None = None) -> int:
         if received:
             applied += 1
     return applied
+
+
+def _norm_lot(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text or text.upper() in ("S/N", "S.N", "S.N.", "SN", "SIN LOTE", "N/A"):
+        return "S/N"
+    return text
+
+
+def apply_inventory_snapshot(conn, rows: list[dict], user_id: int | None = None) -> dict:
+    """Deja el stock de bodega como el informe: item, nombre, kilos y lote. No toca precios."""
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        code = (row.get("item_code") or "").strip()
+        if not code:
+            continue
+        bucket = grouped.setdefault(code, {
+            "name": (row.get("item_name") or "").strip(),
+            "unit": map_unit(row.get("unit")),
+            "lots": {},
+        })
+        if not bucket["name"] and row.get("item_name"):
+            bucket["name"] = str(row["item_name"]).strip()
+        lot_no = _norm_lot(row.get("lot_number"))
+        bucket["lots"][lot_no] = bucket["lots"].get(lot_no, 0.0) + float(row.get("qty") or 0)
+
+    stats = {"created": 0, "updated": 0, "lots": 0, "kg": 0.0}
+    actor = int(user_id or 1)
+
+    for code, data in grouped.items():
+        name = data["name"] or code
+        unit = data["unit"] or "kg"
+        total = round(sum(data["lots"].values()), 6)
+        existing = conn.execute(
+            """SELECT id, name, stock_quantity, chemical_type, last_unit_price
+               FROM chemicals WHERE code = ? AND deleted_at IS NULL""",
+            (code,),
+        ).fetchone()
+        chem_type = resolved_type(name, existing["chemical_type"] if existing else None)
+
+        if not existing:
+            conn.execute(
+                """INSERT INTO chemicals
+                   (name, code, chemical_type, unit, stock_quantity, location,
+                    procurement_status, last_unit_price, last_unit_currency,
+                    pending_qty, created_by, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, 'disponible', 0, 'COP', 0, ?, ?)""",
+                (name, code, chem_type, unit, total, WAREHOUSE, actor, "Carga inventario bodega 10502"),
+            )
+            chemical_id = _last_id(conn)
+            old_stock = 0.0
+            stats["created"] += 1
+        else:
+            chemical_id = int(_scalar(existing, "id"))
+            old_stock = float(_scalar(existing, "stock_quantity") or 0)
+            conn.execute(
+                """UPDATE chemicals
+                   SET name = ?, unit = ?, stock_quantity = ?, location = ?,
+                       procurement_status = ?, chemical_type = ?,
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (name or existing["name"] or code, unit, total, WAREHOUSE, 'disponible', chem_type, chemical_id),
+            )
+            stats["updated"] += 1
+
+        current_lots = conn.execute(
+            "SELECT id, lot_number FROM chemical_lots WHERE chemical_id = ?",
+            (chemical_id,),
+        ).fetchall()
+        by_lot = {_norm_lot(_scalar(lot, "lot_number")): lot for lot in current_lots}
+        seen: set[str] = set()
+
+        for lot_no, qty in data["lots"].items():
+            qty = round(float(qty or 0), 6)
+            if qty <= 0:
+                continue
+            seen.add(lot_no)
+            prev = by_lot.get(lot_no)
+            lot_status = "active"
+            if prev:
+                conn.execute(
+                    """UPDATE chemical_lots
+                       SET quantity_remaining = ?, quantity_received = ?,
+                           status = ?, unit = ?, notes = ?, updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (qty, qty, lot_status, unit, "Inventario bodega 10502", int(_scalar(prev, "id"))),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO chemical_lots
+                       (chemical_id, lot_number, quantity_received, quantity_remaining, unit, notes)
+                       VALUES (?,?,?,?,?,?)""",
+                    (chemical_id, lot_no, qty, qty, unit, "Inventario bodega 10502"),
+                )
+            stats["lots"] += 1
+
+        for lot_no, prev in by_lot.items():
+            if lot_no in seen:
+                continue
+            conn.execute(
+                """UPDATE chemical_lots
+                   SET quantity_remaining = 0, status = 'depleted', updated_at = datetime('now')
+                   WHERE id = ?""",
+                (int(_scalar(prev, "id")),),
+            )
+
+        delta = round(total - old_stock, 6)
+        if abs(delta) > 1e-6:
+            conn.execute(
+                """INSERT INTO stock_movements
+                   (chemical_id, movement_type, quantity, unit,
+                    reference_type, notes, user_id)
+                   VALUES (?, 'adjustment', ?, ?, 'inv_snapshot', ?, ?)""",
+                (chemical_id, delta, unit, f"Inventario bodega {WAREHOUSE}", actor),
+            )
+        stats["kg"] += total
+
+    stats["kg"] = round(stats["kg"], 3)
+    stats["classified"] = reclassify_otros(conn)
+    return stats

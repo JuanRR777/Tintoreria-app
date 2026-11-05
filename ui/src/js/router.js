@@ -3,8 +3,8 @@
  */
 
 import { showView as dashboardView }  from './views/dashboard.js'
-import { showView as chemicalsView }  from './views/chemicals.js'
 import { showView as stockView }      from './views/stock.js'
+import { showView as labView }        from './views/lab.js'
 import { showView as recipesView }    from './views/recipes.js'
 import { showView as processesView }  from './views/processes.js'
 import { showView as weighingView }   from './views/weighing.js'
@@ -13,12 +13,14 @@ import { showView as reportsView }    from './views/reports.js'
 import { showView as settingsView }   from './views/settings.js'
 import { showView as requestsView }   from './views/requests.js'
 import { setPageHeader } from './layout.js'
+import { canView } from './session.js'
 import { closeFloatList } from './components/float-list.js'
 
 const VIEWS = {
   dashboard: dashboardView,
-  chemicals: chemicalsView,
+  chemicals: stockView,
   stock:     stockView,
+  lab:       labView,
   requests:  requestsView,
   recipes:   recipesView,
   processes: processesView,
@@ -44,6 +46,12 @@ export async function navigate(viewName, params = {}) {
   const viewFn = VIEWS[viewName]
   if (!viewFn) {
     console.warn(`Vista desconocida: ${viewName}`)
+    return
+  }
+  if (!canView(viewName)) {
+    const fallback = ['dashboard', 'lab', 'recipes', 'stock', 'requests', 'processes', 'weighing', 'machines', 'reports', 'settings']
+      .find((view) => view !== viewName && canView(view))
+    if (fallback) return navigate(fallback)
     return
   }
 

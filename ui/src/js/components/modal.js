@@ -30,6 +30,7 @@ export function openModal(title, bodyHTML, {
   onClose,
   onRequestClose,
   closeOnOverlay = true,
+  drawer = false,
 } = {}) {
   const overlay = document.getElementById('modal-overlay')
   const box     = document.getElementById('modal-box')
@@ -41,7 +42,8 @@ export function openModal(title, bodyHTML, {
   bodyEl.innerHTML    = bodyHTML
   footerEl.innerHTML  = footerHTML || ''
 
-  box.className = `modal-box${size ? ' modal-' + size : ''}`
+  box.className = `modal-box${size ? ' modal-' + size : ''}${drawer ? ' is-drawer' : ''}`
+  overlay.classList.toggle('is-drawer', drawer)
   overlay.style.display = 'flex'
   _onClose = onClose || null
   _onRequestClose = onRequestClose || null

@@ -67,7 +67,7 @@ async function request(method, path, body = null, opts = {}) {
     const data = await response.json().catch(() => ({ detail: response.statusText }))
 
     if (!response.ok) {
-      const message = data?.detail || data?.message || `Error ${response.status}`
+      const message = formatApiDetail(data?.detail) || data?.message || `Error ${response.status}`
       throw new APIError(message, response.status, data)
     }
 
@@ -119,6 +119,7 @@ export const chemicals = {
   addLot:      (id, d)       => api.post(`/chemicals/${id}/lots`, d),
   updateLot:   (id, lotId, d) => api.put(`/chemicals/${id}/lots/${lotId}`, d),
   movements:   (id)          => api.get(`/chemicals/${id}/movements`),
+  addMovement: (id, d)       => api.post(`/chemicals/${id}/movements`, d),
 }
 
 export const recipes = {
@@ -126,11 +127,13 @@ export const recipes = {
   get:              (id)          => api.get(`/recipes/${id}`),
   create:           (d)           => api.post('/recipes', d),
   update:           (id, d)       => api.put(`/recipes/${id}`, d),
+  copy:             (id)          => api.post(`/recipes/${id}/copy`),
   delete:           (id)          => api.delete(`/recipes/${id}`),
   addStep:          (id, d)       => api.post(`/recipes/${id}/steps`, d),
   deleteStep:       (id, stepId)  => api.delete(`/recipes/${id}/steps/${stepId}`),
   addIngredient:    (id, d)       => api.post(`/recipes/${id}/ingredients`, d),
   deleteIngredient: (id, ingId)   => api.delete(`/recipes/${id}/ingredients/${ingId}`),
+  linkIngredient:   (id, ingId, chemicalId) => api.post(`/recipes/${id}/ingredients/${ingId}/link`, { chemical_id: chemicalId }),
 }
 
 export const processes = {
@@ -162,6 +165,7 @@ export const scales = {
 export const stock = {
   summary:   (opts)   => api.get('/stock/summary', opts || {}),
   movements: (params) => api.get('/stock/movements' + toQuery(params || {})),
+  importInv: (file)   => uploadFile('/stock/import/inv', file),
 }
 
 export const requests = {
@@ -215,6 +219,21 @@ function toQuery(params) {
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&')
   return q ? `?${q}` : ''
+}
+
+function formatApiDetail(detail) {
+  if (!detail) return ''
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map((item) => {
+      if (typeof item === 'string') return item
+      const msg = item?.msg || item?.message || ''
+      const loc = Array.isArray(item?.loc) ? item.loc.filter((part) => part !== 'body').join('.') : ''
+      return loc && msg ? `${loc}: ${msg}` : msg
+    }).filter(Boolean).join(' · ')
+  }
+  if (typeof detail === 'object') return detail.msg || detail.message || ''
+  return String(detail)
 }
 
 export class APIError extends Error {

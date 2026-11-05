@@ -17,14 +17,24 @@ export async function getAppVersion() {
 
 export function formatVersionLabel(version) {
   if (!version || version === 'desarrollo') return 'Modo desarrollo'
-  return `Version ${version}`
+  return `Versión ${version}`
+}
+
+export function formatVersionShort(version) {
+  if (!version || version === 'desarrollo') return 'dev'
+  return `v ${version}`
 }
 
 export async function refreshVersionLabels() {
   const version = await getAppVersion()
   const text = formatVersionLabel(version)
+  const short = formatVersionShort(version)
   document.querySelectorAll('[data-app-version]').forEach((el) => {
     el.textContent = text
+    el.setAttribute('title', text)
+  })
+  document.querySelectorAll('[data-app-version-short]').forEach((el) => {
+    el.textContent = short
     el.setAttribute('title', text)
   })
 }

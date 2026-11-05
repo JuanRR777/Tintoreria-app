@@ -1,6 +1,6 @@
 {
   "name": "tintoreria-local",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Sistema local de gestion de tintoreria de hilos",
   "main": "electron.js",
   "author": "Tintoreria",

@@ -49,7 +49,7 @@ class MachineUpdate(BaseModel):
 
 class ScaleCreate(BaseModel):
     name: str = Field(..., min_length=1)
-    identifier: str = Field(..., min_length=1)
+    identifier: Optional[str] = None
     port: Optional[str] = None
     baud_rate: int = 9600
     data_bits: int = 8

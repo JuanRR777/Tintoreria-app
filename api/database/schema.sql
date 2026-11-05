@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS users (
     phone         TEXT,
     position      TEXT,
     is_active     INTEGER NOT NULL DEFAULT 1,
+    idle_minutes  INTEGER NOT NULL DEFAULT 30,
+    permissions   TEXT,
     last_login    TEXT,
     created_at    TEXT DEFAULT (datetime('now')),
     updated_at    TEXT DEFAULT (datetime('now')),
@@ -64,6 +66,7 @@ CREATE TABLE IF NOT EXISTS chemicals (
     last_unit_price    REAL DEFAULT 0,
     last_unit_currency TEXT DEFAULT 'COP',
     pending_qty        REAL NOT NULL DEFAULT 0,
+    lab_quantity       REAL NOT NULL DEFAULT 0,
     created_by       INTEGER,
     created_at       TEXT DEFAULT (datetime('now')),
     updated_at       TEXT DEFAULT (datetime('now')),
@@ -78,6 +81,7 @@ CREATE TABLE IF NOT EXISTS chemical_lots (
     lot_number          TEXT NOT NULL,
     quantity_received   REAL NOT NULL,
     quantity_remaining  REAL NOT NULL,
+    lab_quantity        REAL NOT NULL DEFAULT 0,
     unit                TEXT NOT NULL,
     purchase_date       TEXT,
     expiry_date         TEXT,
@@ -227,6 +231,10 @@ CREATE TABLE IF NOT EXISTS recipes (
                           'nylon','seda','mezcla','otros')),
     color_reference   TEXT,
     color_name        TEXT,
+    yarn_title        TEXT,
+    commercial_ref    TEXT,
+    color_depth       TEXT,
+    process_route     TEXT,
     target_color_hex  TEXT,
     bath_ratio_l_per_kg REAL,
     temperature_c     REAL,
@@ -259,7 +267,7 @@ CREATE TABLE IF NOT EXISTS recipe_steps (
     FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
 );
 
--- Ingredientes de la receta (cantidad por kg de fibra)
+-- Ingredientes de la receta (quantity_per_kg guarda el valor de fórmula: % o g/L)
 CREATE TABLE IF NOT EXISTS recipe_ingredients (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     recipe_id            INTEGER NOT NULL,
@@ -267,6 +275,7 @@ CREATE TABLE IF NOT EXISTS recipe_ingredients (
     chemical_id          INTEGER NOT NULL,
     quantity_per_kg      REAL NOT NULL,
     unit                 TEXT NOT NULL,
+    dose_basis           TEXT DEFAULT 'per_kg',
     tolerance_percentage REAL DEFAULT 5,
     is_critical          INTEGER DEFAULT 0,
     sort_order           INTEGER DEFAULT 0,

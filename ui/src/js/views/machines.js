@@ -1,7 +1,10 @@
-import { machines as machinesApi, scales as scalesApi } from '../api.js'
+import { machines as machinesApi, scales as scalesApi, processes as processesApi } from '../api.js'
 import { toast }  from '../components/toast.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
 import { setPageHeader } from '../layout.js'
+import { closeFloatList, isFloatListOpen, openFloatList } from '../components/float-list.js'
+
+const MACHINE_SLOTS = 12
 
 export async function showView(container) {
   setPageHeader({
@@ -9,9 +12,11 @@ export async function showView(container) {
     subtitle: 'Equipo de tintura y perifericos de pesaje',
   })
   container.innerHTML = `
-    <div style="display:flex;gap:12px;margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
       <button class="btn ${_tab==='machines'?'btn-primary':'btn-secondary'}" id="tab-machines" data-tab="machines">Maquinas</button>
       <button class="btn ${_tab==='scales'?'btn-primary':'btn-secondary'}"   id="tab-scales"   data-tab="scales">Basculas</button>
+      <div style="flex:1"></div>
+      <div id="machines-action"></div>
     </div>
     <div id="machines-panel"></div>
   `
@@ -56,10 +61,17 @@ const DYE_FORMATS = [
 ]
 
 const MACHINE_STATUSES = [
-  { id: 'active', label: 'Activa', tone: 'success' },
-  { id: 'maintenance', label: 'Mantenimiento', tone: 'warning' },
-  { id: 'inactive', label: 'Inactiva', tone: 'muted' },
+  { id: 'active', label: 'Activa', card: 'Activa', tone: 'success' },
+  { id: 'maintenance', label: 'Mantenimiento', card: 'En mantenimiento', tone: 'warning' },
+  { id: 'inactive', label: 'Inactiva', card: 'Inactiva', tone: 'muted' },
 ]
+
+const PROCESS_STATUS = {
+  pending: 'Programado', in_progress: 'En proceso', paused: 'Pausado',
+  completed: 'Terminado', cancelled: 'Cancelado',
+}
+
+const ICO_MACHINE = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2.5" width="16" height="19" rx="2.5"/><path d="M4 7h16"/><circle cx="7.5" cy="4.8" r="0.6" fill="currentColor"/><circle cx="12" cy="14" r="4.5"/><path d="M9.5 14.6c1.2-1 2.6 1 4 0"/></svg>'
 
 const ICO_CALC = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h2M12 12h2M16 12h0M8 16h2M12 16h2M16 16h0"/></svg>'
 
@@ -92,51 +104,166 @@ function esc(value) {
     .replaceAll('"', '&quot;')
 }
 
-function fmtMachineDate(value) {
-  if (!value) return '—'
-  const d = new Date(String(value).replace(' ', 'T'))
-  if (Number.isNaN(d.getTime())) return String(value)
-  return d.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' })
+function parseDate(value) {
+  if (!value) return null
+  const raw = String(value).trim()
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : raw.replace(' ', 'T') + 'Z'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? null : d
 }
 
-function machineAccent(m) {
-  const tones = {
-    jet: '#0284c7', overflow: '#0f766e', carretel: '#7c3aed',
-    autoclave: '#d97706', continuo: '#0369a1', barca: '#be185d',
-    jigger: '#ea580c', otro: '#64748b',
-  }
-  return tones[m.equipment_type] || '#0284c7'
+function fmtMachineDate(value) {
+  const d = parseDate(value)
+  if (!d) return '—'
+  return d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+function relativeUpdated(value) {
+  const d = parseDate(value)
+  if (!d) return '—'
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000)
+  if (days <= 0) return 'hoy'
+  if (days === 1) return 'ayer'
+  if (days < 30) return `hace ${days} días`
+  const months = Math.floor(days / 30)
+  if (months < 12) return months === 1 ? 'hace 1 mes' : `hace ${months} meses`
+  const years = Math.floor(days / 365)
+  return years <= 1 ? 'hace 1 año' : `hace ${years} años`
+}
+
+function fmtNumber(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  return n.toLocaleString('es-CO', { maximumFractionDigits: 1 })
+}
+
+function machineNumber(name) {
+  const norm = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  const match = norm.match(/maquina\s*(\d+)/)
+  return match ? Number(match[1]) : null
+}
+
+function slotLabel(n) {
+  return `Máquina ${n}`
+}
+
+function displayName(m) {
+  const n = machineNumber(m.name)
+  return n ? slotLabel(n) : (m.name || 'Sin nombre')
+}
+
+function freeSlots(list, keepId = null) {
+  const used = new Set(
+    list.filter((m) => m.id !== keepId).map((m) => machineNumber(m.name)).filter(Boolean),
+  )
+  return Array.from({ length: MACHINE_SLOTS }, (_, i) => i + 1).filter((n) => !used.has(n))
 }
 
 function machineCard(m) {
   const st = statusMeta(m.status)
-  const badge = m.status === 'active' ? 'badge-green' : m.status === 'maintenance' ? 'badge-amber' : 'badge-gray'
-  const accent = machineAccent(m)
-  const year = m.manufacture_year ? `Año ${esc(m.manufacture_year)}` : ''
+  const ratio = Number(m.bath_ratio_l_per_kg)
+  const cap = fmtNumber(m.capacity_kg)
+  const water = fmtNumber(m.water_capacity_liters)
+  const chips = [dyeLabel(m), equipmentLabel(m), m.manufacture_year ? `Año ${m.manufacture_year}` : '']
+    .filter((c) => c && c !== '—')
   return `
-    <article class="recipe-card" data-edit-machine="${m.id}" style="--recipe-accent:${accent}">
-      <div class="recipe-card-accent"></div>
-      <header class="recipe-card-top">
-        <span class="badge ${badge}">${st.label}</span>
-        <span class="recipe-card-ver">${esc(equipmentLabel(m))}</span>
+    <article class="mc-card is-${st.tone}" data-edit-machine="${m.id}">
+      <header class="mc-head">
+        <span class="mc-ico">${ICO_MACHINE}</span>
+        <div class="mc-title">
+          <h3>${esc(displayName(m))}</h3>
+          <code>${esc(m.code || '—')}</code>
+        </div>
+        <button type="button" class="mc-status is-${st.tone}" data-status-machine="${m.id}" aria-haspopup="menu" aria-expanded="false"><i></i>${esc(st.card)}</button>
       </header>
-      <p class="recipe-card-code">${esc(m.code || m.name || 'Sin código')}</p>
-      <h3 class="recipe-card-name">${esc(m.name || 'Sin nombre')}</h3>
-      <p class="recipe-card-meta">
-        <span>${esc(dyeLabel(m))}</span>
-        ${year ? `<span class="recipe-card-sep">·</span><span>${year}</span>` : ''}
-      </p>
-      <p class="recipe-card-dates">Creada ${fmtMachineDate(m.created_at)} · Actualizada ${fmtMachineDate(m.updated_at)}</p>
-      <div class="recipe-card-stats">
-        <div><span>Capacidad</span><strong>${m.capacity_kg ? `${esc(m.capacity_kg)} kg` : '—'}</strong></div>
-        <div><span>Agua</span><strong>${m.water_capacity_liters ? `${esc(m.water_capacity_liters)} L` : '—'}</strong></div>
+      ${chips.length ? `<div class="mc-chips">${chips.map((c) => `<span>${esc(c)}</span>`).join('')}</div>` : ''}
+      <div class="mc-stats">
+        <div><span>Capacidad</span><strong>${cap ? `${cap}<small>kg</small>` : '—'}</strong></div>
+        <div><span>Agua</span><strong>${water ? `${water}<small>L</small>` : '—'}</strong></div>
         <div><span>Relación</span><strong>${bathRatioText(m)}</strong></div>
       </div>
-      <footer class="recipe-card-actions">
-        <button type="button" class="btn btn-ghost btn-sm" data-edit-machine="${m.id}">Editar</button>
-        <button type="button" class="btn btn-ghost btn-sm text-danger" data-delete-machine="${m.id}">Eliminar</button>
+      ${ratio ? `<p class="mc-hint">${fmtNumber(ratio)} L de agua por kg de material</p>` : ''}
+      <footer class="mc-foot">
+        <span title="Creada ${esc(fmtMachineDate(m.created_at))}">Actualizada ${esc(relativeUpdated(m.updated_at))}</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-edit-machine="${m.id}">Editar</button>
+        <button type="button" class="mc-more" data-more-machine="${m.id}" aria-label="Más acciones">···</button>
       </footer>
     </article>`
+}
+
+function machineStatusMenu(current) {
+  return `
+    <div class="mc-menu mc-status-menu">
+      ${MACHINE_STATUSES.map((s) => `
+        <button type="button" data-mc-status="${s.id}" class="${s.id === current ? 'is-current' : ''}">
+          <i class="is-${s.tone}"></i>${esc(s.card)}
+        </button>`).join('')}
+    </div>`
+}
+
+function machineMenuHtml() {
+  return `
+    <div class="mc-menu">
+      <button type="button" data-mc-act="history">Ver historial de lotes</button>
+      <button type="button" data-mc-act="duplicate">Duplicar</button>
+      <button type="button" data-mc-act="delete" class="is-danger">Eliminar</button>
+    </div>`
+}
+
+async function openMachineHistory(m) {
+  const body = openModal(`Historial de lotes · ${displayName(m)}`, '<div class="loading-state"><div class="spinner"></div></div>', { size: 'lg' })
+  try {
+    const rows = await processesApi.list({ machine_id: m.id, limit: 200 })
+    if (!body) return
+    if (!rows.length) {
+      body.innerHTML = '<div class="empty-state"><p>Esta máquina aún no tiene lotes registrados</p></div>'
+      return
+    }
+    body.innerHTML = `
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead><tr><th>Lote</th><th>Receta</th><th>Kg</th><th>Estado</th><th>Fecha</th></tr></thead>
+          <tbody>
+            ${rows.map((p) => `
+              <tr>
+                <td><code>${esc(p.batch_number)}</code></td>
+                <td>${esc(p.recipe_name || '—')}</td>
+                <td>${esc(fmtNumber(p.fiber_weight_kg) || '—')}</td>
+                <td>${esc(PROCESS_STATUS[p.status] || p.status)}</td>
+                <td>${esc(fmtMachineDate(p.scheduled_at || p.created_at))}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`
+  } catch (err) {
+    if (body) body.innerHTML = `<div class="empty-state"><p>${esc(err.message)}</p></div>`
+  }
+}
+
+async function duplicateMachine(m, list) {
+  const slot = freeSlots(list)[0]
+  if (!slot) {
+    toast.error(`Ya están creadas las ${MACHINE_SLOTS} máquinas`)
+    return
+  }
+  try {
+    await machinesApi.create({
+      name: slotLabel(slot),
+      machine_type: m.machine_type || 'tintura',
+      equipment_type: m.equipment_type || undefined,
+      dye_format: m.dye_format || 'ambos',
+      capacity_kg: Number(m.capacity_kg) || 0,
+      water_capacity_liters: Number(m.water_capacity_liters) || 0,
+      manufacture_year: m.manufacture_year || undefined,
+      status: 'active',
+      notes: m.notes || undefined,
+    })
+    toast.success(`${slotLabel(slot)} creada a partir de ${displayName(m)}`)
+    await loadMachines()
+  } catch (err) {
+    toast.error(err.message)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,14 +273,15 @@ function machineCard(m) {
 async function loadMachines() {
   const panel = document.getElementById('machines-panel')
   if (!panel) return
-  panel.innerHTML = `
-    <div class="toolbar" style="margin-bottom:12px">
-      <div style="flex:1"></div>
+  const action = document.getElementById('machines-action')
+  if (action) {
+    action.innerHTML = `
       <button class="btn btn-primary" id="btn-new-machine">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Nueva maquina
-      </button>
-    </div>
+      </button>`
+  }
+  panel.innerHTML = `
     <div id="machines-list"><div class="loading-state"><div class="spinner"></div></div></div>
   `
   document.getElementById('btn-new-machine').onclick = () => openMachineForm(null, () => loadMachines())
@@ -167,25 +295,69 @@ async function loadMachines() {
       return
     }
 
-    list.innerHTML = `<div class="recipe-grid">${data.map(machineCard).join('')}</div>`
+    const ordered = [...data].sort((a, b) => (
+      (machineNumber(a.name) ?? 999) - (machineNumber(b.name) ?? 999)
+      || String(a.code || '').localeCompare(String(b.code || ''))
+    ))
+    list.innerHTML = `<div class="mc-grid">${ordered.map(machineCard).join('')}</div>`
 
-    list.querySelectorAll('.recipe-card').forEach((card) => {
+    list.querySelectorAll('.mc-card').forEach((card) => {
       card.onclick = (e) => {
-        if (e.target.closest('[data-delete-machine]')) return
+        if (e.target.closest('[data-more-machine], [data-edit-machine].btn, [data-status-machine]')) return
         openMachineForm(parseInt(card.dataset.editMachine, 10), () => loadMachines())
       }
     })
-    list.querySelectorAll('[data-edit-machine]').forEach((btn) => {
-      if (btn.classList.contains('recipe-card')) return
+    list.querySelectorAll('.mc-foot [data-edit-machine]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation()
         openMachineForm(parseInt(btn.dataset.editMachine, 10), () => loadMachines())
       }
     })
-    list.querySelectorAll('[data-delete-machine]').forEach((btn) => {
+    list.querySelectorAll('[data-status-machine]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation()
-        deleteMachine(parseInt(btn.dataset.deleteMachine, 10))
+        if (isFloatListOpen(btn)) { closeFloatList(); return }
+        const m = data.find((x) => x.id === Number(btn.dataset.statusMachine))
+        if (!m) return
+        openFloatList(btn, machineStatusMenu(m.status), {
+          onBind: (panel) => {
+            panel.querySelectorAll('[data-mc-status]').forEach((item) => {
+              item.onclick = async () => {
+                const next = item.dataset.mcStatus
+                closeFloatList()
+                if (next === m.status) return
+                try {
+                  await machinesApi.update(m.id, { status: next })
+                  toast.success('Estado actualizado')
+                  await loadMachines()
+                } catch (err) {
+                  toast.error(err.message)
+                }
+              }
+            })
+          },
+        })
+      }
+    })
+    list.querySelectorAll('[data-more-machine]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation()
+        if (isFloatListOpen(btn)) { closeFloatList(); return }
+        const m = data.find((x) => x.id === Number(btn.dataset.moreMachine))
+        if (!m) return
+        openFloatList(btn, machineMenuHtml(), {
+          onBind: (panel) => {
+            panel.querySelectorAll('[data-mc-act]').forEach((item) => {
+              item.onclick = () => {
+                closeFloatList()
+                const act = item.dataset.mcAct
+                if (act === 'history') openMachineHistory(m)
+                else if (act === 'duplicate') duplicateMachine(m, data)
+                else if (act === 'delete') deleteMachine(m.id)
+              }
+            })
+          },
+        })
       }
     })
   } catch (err) {
@@ -222,8 +394,17 @@ function paintBathRatio() {
   }
 }
 
-function openMachineForm(machineId, onSuccess) {
+async function openMachineForm(machineId, onSuccess) {
   const isEdit = machineId !== null
+  const all = await machinesApi.list().catch(() => [])
+  const current = isEdit ? all.find((m) => m.id === machineId) : null
+  const currentSlot = current ? machineNumber(current.name) : null
+  const slots = freeSlots(all, machineId)
+  if (!isEdit && !slots.length) {
+    toast.error(`Ya están creadas las ${MACHINE_SLOTS} máquinas`)
+    return
+  }
+  const legacyName = current && !currentSlot ? current.name : ''
   const formHTML = `
     <form id="machine-form">
       <section class="mf-section">
@@ -231,7 +412,10 @@ function openMachineForm(machineId, onSuccess) {
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Nombre <span class="required"></span></label>
-            <input id="mf-name" class="form-input" placeholder="Nombre de la máquina" required>
+            <select id="mf-name" class="form-select" required>
+              ${legacyName ? `<option value="">${esc(legacyName)} (elige un número)</option>` : ''}
+              ${slots.map((n) => `<option value="${n}" ${n === currentSlot ? 'selected' : ''}>${slotLabel(n)}</option>`).join('')}
+            </select>
           </div>
           <div class="form-group">
             <label class="form-label">Tipo <span class="required"></span></label>
@@ -300,14 +484,13 @@ function openMachineForm(machineId, onSuccess) {
     <button class="btn btn-secondary" onclick="document.getElementById('modal-overlay').style.display='none'">Cancelar</button>
     <button class="btn btn-primary" id="mf-submit">${isEdit ? 'Guardar' : 'Crear'}</button>
   `
-  openModal(isEdit ? 'Editar máquina' : 'Nueva máquina', formHTML, { size: 'lg', footerHTML: footer })
+  openModal(isEdit ? 'Editar máquina' : 'Nueva máquina', formHTML, { footerHTML: footer, drawer: true })
   bindPills()
   document.getElementById('mf-capacity').oninput = paintBathRatio
   document.getElementById('mf-water').oninput = paintBathRatio
 
   if (isEdit) {
     machinesApi.get(machineId).then((m) => {
-      document.getElementById('mf-name').value = m.name || ''
       document.getElementById('mf-type').value = m.equipment_type || ''
       document.getElementById('mf-capacity').value = m.capacity_kg || ''
       document.getElementById('mf-water').value = m.water_capacity_liters || ''
@@ -321,7 +504,8 @@ function openMachineForm(machineId, onSuccess) {
 
   document.getElementById('mf-submit').onclick = async () => {
     const errEl = document.getElementById('mf-error')
-    const name = document.getElementById('mf-name').value.trim()
+    const slot = Number(document.getElementById('mf-name').value)
+    const name = slot ? slotLabel(slot) : ''
     const type = document.getElementById('mf-type').value
     const dyeFormat = pillValue('format')
     if (!name || !type) {
@@ -363,7 +547,12 @@ function openMachineForm(machineId, onSuccess) {
 async function deleteMachine(id) {
   const ok = await confirm('Eliminar esta maquina del sistema.', 'Eliminar maquina')
   if (!ok) return
-  try { await machinesApi.delete(id); toast.success('Maquina eliminada'); await loadMachines() }
+  try {
+    const res = await machinesApi.delete(id)
+    if (res?.deactivated) toast.info('La máquina tiene procesos registrados; quedó como inactiva')
+    else toast.success('Maquina eliminada')
+    await loadMachines()
+  }
   catch (err) { toast.error(err.message) }
 }
 
@@ -374,14 +563,15 @@ async function deleteMachine(id) {
 async function loadScales() {
   const panel = document.getElementById('machines-panel')
   if (!panel) return
-  panel.innerHTML = `
-    <div class="toolbar" style="margin-bottom:12px">
-      <div style="flex:1"></div>
+  const action = document.getElementById('machines-action')
+  if (action) {
+    action.innerHTML = `
       <button class="btn btn-primary" id="btn-new-scale">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Nueva bascula
-      </button>
-    </div>
+      </button>`
+  }
+  panel.innerHTML = `
     <div id="scales-list"><div class="loading-state"><div class="spinner"></div></div></div>
   `
   document.getElementById('btn-new-scale').onclick = () => openScaleForm(null, () => loadScales())
@@ -493,9 +683,10 @@ async function openScaleForm(scaleId, onSuccess) {
 
     const payload = {
       name,
+      identifier: port.replace(/[^A-Za-z0-9]+/g, '-') || undefined,
       port,
       protocol:  document.getElementById('sf-protocol').value,
-      baud_rate: parseInt(document.getElementById('sf-baud').value),
+      baud_rate: parseInt(document.getElementById('sf-baud').value, 10),
     }
 
     const btn = document.getElementById('sf-submit')

@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from schemas.chemical import ChemicalCreate, ChemicalUpdate, LotCreate, LotUpdate, StockAdjustment
-from database.connection import get_db, rows_to_list, row_to_dict, generate_code
+from database.connection import get_db, rows_to_list, row_to_dict, generate_code, ensure_recipes_schema, ensure_inventory_schema
 from routers.auth import get_current_user
 from services import sync_service
 from services.inventory_sync import migrate_legacy_lot_numbers
@@ -50,6 +50,7 @@ def list_chemicals(
         FROM chemicals c
         LEFT JOIN users u ON c.created_by = u.id
         WHERE c.deleted_at IS NULL AND c.is_active = 1
+          AND c.code NOT LIKE 'TMP%'
     """
     params: list = []
 
@@ -75,6 +76,8 @@ def list_chemicals(
     query += " ORDER BY CASE c.procurement_status WHEN 'espera' THEN 0 WHEN 'pedido' THEN 1 ELSE 2 END, c.name"
 
     with get_db() as conn:
+        ensure_recipes_schema(conn)
+        ensure_inventory_schema(conn)
         migrate_legacy_lot_numbers(conn)
         rows = conn.execute(query, params).fetchall()
     return rows_to_list(rows)
@@ -264,6 +267,80 @@ def update_lot(
         row = conn.execute("SELECT * FROM chemical_lots WHERE id = ?", (lot_id,)).fetchone()
 
     return row_to_dict(row)
+
+
+@router.post("/{chemical_id}/movements", status_code=201)
+def register_movement(chemical_id: int, req: StockAdjustment, current_user: dict = Depends(get_current_user)):
+    """Entrada, salida, merma, devolucion o ajuste manual; mueve el stock y el lote si se indica."""
+    kind = req.movement_type
+    if kind == "adjustment" and req.direction not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="Indica si el ajuste suma o resta")
+    negative = kind in ("out", "waste") or (kind == "adjustment" and req.direction == "down")
+    to_lab = kind == "out" and req.destination == "laboratorio"
+    delta = -req.quantity if negative else req.quantity
+
+    with get_db() as conn:
+        ensure_inventory_schema(conn)
+        chem = conn.execute(
+            "SELECT id, unit, stock_quantity FROM chemicals WHERE id = ? AND deleted_at IS NULL",
+            (chemical_id,),
+        ).fetchone()
+        if not chem:
+            raise HTTPException(status_code=404, detail="Quimico no encontrado")
+        unit = req.unit or chem["unit"] or "kg"
+        stock_now = float(chem["stock_quantity"] or 0)
+        if negative and req.quantity > stock_now + 1e-6:
+            raise HTTPException(status_code=409, detail=f"Solo hay {stock_now:g} {unit} en bodega")
+
+        if req.lot_id:
+            lot = conn.execute(
+                "SELECT id, quantity_remaining, lab_quantity FROM chemical_lots WHERE id = ? AND chemical_id = ?",
+                (req.lot_id, chemical_id),
+            ).fetchone()
+            if not lot:
+                raise HTTPException(status_code=404, detail="Lote no encontrado")
+            left = float(lot["quantity_remaining"] or 0)
+            if negative and req.quantity > left + 1e-6:
+                raise HTTPException(status_code=409, detail=f"El lote solo tiene {left:g} {unit}")
+            new_left = max(0.0, left + delta)
+            lab_left = float(lot["lab_quantity"] or 0) + (req.quantity if to_lab else 0)
+            conn.execute(
+                """UPDATE chemical_lots
+                   SET quantity_remaining = ?, lab_quantity = ?, status = ?, updated_at = datetime('now')
+                   WHERE id = ?""",
+                (new_left, lab_left, "active" if new_left > 1e-6 or lab_left > 1e-6 else "depleted", req.lot_id),
+            )
+
+        if to_lab:
+            conn.execute(
+                """UPDATE chemicals
+                   SET stock_quantity = MAX(0, stock_quantity + ?),
+                       lab_quantity = COALESCE(lab_quantity, 0) + ?,
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (delta, req.quantity, chemical_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE chemicals SET stock_quantity = MAX(0, stock_quantity + ?), updated_at = datetime('now') WHERE id = ?",
+                (delta, chemical_id),
+            )
+        conn.execute(
+            """INSERT INTO stock_movements
+               (chemical_id, lot_id, movement_type, quantity, unit, reference_type, notes, user_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                chemical_id, req.lot_id, kind,
+                delta if kind == "adjustment" else req.quantity,
+                unit, "laboratorio" if to_lab else "manual",
+                (req.notes or "").strip() or None, current_user["id"],
+            ),
+        )
+        row = conn.execute("SELECT * FROM chemicals WHERE id = ?", (chemical_id,)).fetchone()
+
+    chem_row = row_to_dict(row)
+    sync_service.enqueue("chemical", chemical_id, "update", chem_row)
+    return chem_row
 
 
 # ---------------------------------------------------------------------------

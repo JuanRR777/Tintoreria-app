@@ -14,21 +14,23 @@ const PROC_LABELS = {
   pedido: 'Pedido',
 }
 
+const CHART_SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100']
+
 const PROC_COLORS = {
-  disponible: '#16a34a',
-  espera: '#d97706',
-  pedido: '#0284c7',
+  disponible: CHART_SERIES[2],
+  espera: CHART_SERIES[3],
+  pedido: CHART_SERIES[0],
 }
 
 const CHART_COLORS = {
-  accent: '#0284c7',
-  accentFill: 'rgba(2, 132, 199, 0.16)',
-  success: '#16a34a',
-  successFill: 'rgba(22, 163, 74, 0.16)',
-  warning: '#d97706',
-  muted: '#94a3b8',
-  grid: '#e2e8f0',
-  text: '#64748b',
+  accent: CHART_SERIES[0],
+  accentFill: 'rgba(42, 120, 214, 0.16)',
+  success: CHART_SERIES[2],
+  successFill: 'rgba(27, 175, 122, 0.16)',
+  warning: CHART_SERIES[3],
+  muted: '#66758a',
+  grid: '#e1e7ee',
+  text: '#66758a',
 }
 
 let charts = []
@@ -65,7 +67,7 @@ function renderDashboard(d) {
     <div class="dash-kpis">
       ${kpiCard({
         tone: 'accent',
-        nav: 'chemicals',
+        nav: 'stock',
         label: 'Químicos',
         value: d.chemicals_total ?? 0,
         hint: `${d.available_count ?? 0} en bodega · ${fmtQty(d.stock_kg)} kg`,
@@ -281,7 +283,7 @@ function paintCharts(d) {
   }
 
   const types = d.chemical_types || []
-  const typePalette = ['#0284c7', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#4f46e5', '#0f766e', '#64748b']
+  const typePalette = [...CHART_SERIES, '#7a8aa3', '#a8b4c6']
   if (canvas('chart-types')) {
     charts.push(new Chart(canvas('chart-types'), {
     type: 'doughnut',

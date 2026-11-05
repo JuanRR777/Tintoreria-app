@@ -101,8 +101,25 @@ def delete_machine(machine_id: int, current_user: dict = Depends(get_current_use
         ).fetchone()
         if in_use:
             raise HTTPException(status_code=409, detail="La maquina tiene procesos activos")
+        has_history = conn.execute(
+            "SELECT id FROM processes WHERE machine_id = ? AND status != 'cancelled' LIMIT 1",
+            (machine_id,),
+        ).fetchone()
+        if has_history:
+            conn.execute(
+                "UPDATE machines SET status = 'inactive', updated_at = datetime('now') WHERE id = ?",
+                (machine_id,),
+            )
+            return {
+                "message": "La maquina tiene procesos registrados; se marco como inactiva",
+                "deactivated": True,
+            }
+        conn.execute(
+            "UPDATE processes SET machine_id = NULL, updated_at = datetime('now') WHERE machine_id = ? AND status = 'cancelled'",
+            (machine_id,),
+        )
         conn.execute("DELETE FROM machines WHERE id = ?", (machine_id,))
-    return {"message": "Maquina eliminada"}
+    return {"message": "Maquina eliminada", "deactivated": False}
 
 
 # ---------------------------------------------------------------------------
@@ -131,18 +148,28 @@ def get_scale(scale_id: int, current_user: dict = Depends(get_current_user)):
     return row_to_dict(row)
 
 
+def _scale_identifier(conn, requested: Optional[str], port: Optional[str]) -> str:
+    raw = (requested or port or "BSC").strip().upper().replace(" ", "")
+    base = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in raw) or "BSC"
+    ident = base
+    n = 2
+    while conn.execute("SELECT id FROM scales WHERE identifier = ?", (ident,)).fetchone():
+        ident = f"{base}-{n}"
+        n += 1
+    return ident
+
+
 @router.post("/scales", status_code=201)
 def create_scale(req: ScaleCreate, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        if conn.execute("SELECT id FROM scales WHERE identifier = ?", (req.identifier,)).fetchone():
-            raise HTTPException(status_code=409, detail="El identificador ya existe")
+        identifier = _scale_identifier(conn, req.identifier, req.port)
         conn.execute(
             """INSERT INTO scales
                (name, identifier, port, baud_rate, data_bits, parity, stop_bits,
                 protocol, unit, precision_decimals, max_weight, notes)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                req.name, req.identifier, req.port, req.baud_rate, req.data_bits,
+                req.name, identifier, req.port, req.baud_rate, req.data_bits,
                 req.parity, req.stop_bits, req.protocol, req.unit,
                 req.precision_decimals, req.max_weight, req.notes,
             ),

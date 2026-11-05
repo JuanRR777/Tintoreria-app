@@ -34,13 +34,64 @@ export function sessionRoleLabel() {
   return ROLE_LABELS[key] || currentUser?.role_name || 'Usuario'
 }
 
-export function isAdmin() {
-  const raw = currentUser?.permissions
-  let perms = raw
+export const APP_VIEWS = [
+  { id: 'dashboard', label: 'Dashboard', section: 'General' },
+  { id: 'stock', label: 'Inventario', section: 'Laboratorio' },
+  { id: 'lab', label: 'Inventario lab', section: 'Laboratorio' },
+  { id: 'requests', label: 'Solicitudes', section: 'Laboratorio' },
+  { id: 'recipes', label: 'Recetas', section: 'Laboratorio' },
+  { id: 'processes', label: 'Procesos', section: 'Producción' },
+  { id: 'weighing', label: 'Pesaje', section: 'Producción' },
+  { id: 'machines', label: 'Máquinas', section: 'Producción' },
+  { id: 'reports', label: 'Reportes', section: 'Análisis' },
+]
+
+const VIEW_GRANTS = {
+  dashboard: ['dashboard'],
+  stock: ['stock', 'quimicos.all', 'quimicos.read'],
+  lab: ['lab'],
+  requests: ['requests', 'solicitudes'],
+  recipes: ['recipes', 'recetas.all', 'recetas.read'],
+  processes: ['processes', 'procesos.all'],
+  weighing: ['weighing', 'procesos.all'],
+  machines: ['machines', 'maquinas.read', 'maquinas.all'],
+  reports: ['reports', 'reportes.all'],
+}
+
+export function permissionList(raw = currentUser?.permissions) {
+  if (Array.isArray(raw)) return raw
   if (typeof raw === 'string') {
-    try { perms = JSON.parse(raw) } catch { perms = [] }
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
   }
-  if (Array.isArray(perms) && perms.includes('*')) return true
+  return []
+}
+
+export function viewsFromPermissions(raw) {
+  const perms = permissionList(raw)
+  if (perms.includes('*')) return APP_VIEWS.map((view) => view.id)
+  return APP_VIEWS
+    .filter((view) => (VIEW_GRANTS[view.id] || [view.id]).some((grant) => perms.includes(grant)))
+    .map((view) => view.id)
+}
+
+export function roleGrantsAll(role) {
+  return role?.name === 'admin' || permissionList(role?.permissions).includes('*')
+}
+
+export function canView(view) {
+  if (view === 'settings') return true
+  const perms = permissionList()
+  if (perms.includes('*')) return true
+  return (VIEW_GRANTS[view] || [view]).some((grant) => perms.includes(grant))
+}
+
+export function isAdmin() {
+  if (permissionList().includes('*')) return true
   const key = sessionRoleKey()
   return key === 'admin' || key === 'administrador'
 }

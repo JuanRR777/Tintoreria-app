@@ -6,14 +6,9 @@ import { auth, stock, setToken, clearToken, setApiBase, getToken } from './api.j
 import { initRouter, navigate }  from './router.js'
 import { toast }                 from './components/toast.js'
 import { refreshVersionLabels }  from './appVersion.js'
-import { paintUserChip }         from './layout.js'
-import {
-  setSession,
-  clearSession,
-  sessionDisplayName,
-  sessionRoleLabel,
-  sessionInitials,
-} from './session.js'
+import { applyViewAccess, paintUserChip } from './layout.js'
+import { canView } from './session.js'
+import { setSession, clearSession, getSession } from './session.js'
 
 const TOKEN_KEY = 'tintoreria_token'
 const SIDEBAR_COLLAPSED_KEY = 'tintoreria_sidebar_collapsed'
@@ -55,6 +50,7 @@ async function init() {
   document.getElementById('login-form')?.addEventListener('submit', handleLogin)
 
   await refreshVersionLabels()
+  startIdleWatch()
 
   // Verificar token existente
   const savedToken = localStorage.getItem(TOKEN_KEY)
@@ -109,11 +105,46 @@ async function handleLogin(e) {
 }
 
 async function logout() {
+  clearTimeout(idleTimer)
   try { await auth.logout() } catch { /* ignorar */ }
   localStorage.removeItem(TOKEN_KEY)
   clearToken()
   clearSession()
   showLogin()
+}
+
+let idleTimer = null
+let idleNotedAt = 0
+
+function idleMinutes() {
+  const minutes = Number(getSession()?.idle_minutes)
+  if (!Number.isFinite(minutes)) return 30
+  return minutes > 0 ? minutes : 0
+}
+
+function armIdle() {
+  clearTimeout(idleTimer)
+  const app = document.getElementById('app')
+  const minutes = idleMinutes()
+  if (!minutes || !app || app.style.display === 'none') return
+  idleTimer = setTimeout(() => {
+    toast.info('Sesión cerrada por inactividad')
+    logout()
+  }, minutes * 60 * 1000)
+}
+
+function noteActivity() {
+  const now = Date.now()
+  if (now - idleNotedAt < 1000) return
+  idleNotedAt = now
+  armIdle()
+}
+
+function startIdleWatch() {
+  ;['pointerdown', 'keydown', 'mousemove', 'wheel'].forEach((eventName) => {
+    window.addEventListener(eventName, noteActivity, { passive: true })
+  })
+  window.addEventListener('tintoreria-idle-change', armIdle)
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +155,6 @@ function showLogin() {
   clearSession()
   document.getElementById('login-screen').style.display  = 'flex'
   document.getElementById('app').style.display           = 'none'
-  document.getElementById('app-version-chip')?.setAttribute('hidden', '')
   document.getElementById('username')?.focus()
   refreshVersionLabels()
 }
@@ -133,19 +163,15 @@ function showApp(user) {
   setSession(user)
   document.getElementById('login-screen').style.display = 'none'
   document.getElementById('app').style.display          = 'flex'
-  document.getElementById('app-version-chip')?.removeAttribute('hidden')
   refreshVersionLabels()
 
-  const nameEl = document.getElementById('user-name')
-  const roleEl = document.getElementById('user-role')
-  const avatarEl = document.getElementById('user-avatar')
-  if (nameEl) nameEl.textContent = sessionDisplayName()
-  if (roleEl) roleEl.textContent = sessionRoleLabel()
-  if (avatarEl) avatarEl.textContent = sessionInitials()
   paintUserChip()
+  applyViewAccess()
+  armIdle()
 
-  // Cargar dashboard como vista inicial
-  navigate('dashboard')
+  const landing = ['dashboard', 'stock', 'lab', 'requests', 'recipes', 'processes', 'weighing', 'machines', 'reports', 'settings']
+    .find((view) => canView(view))
+  navigate(landing || 'settings')
 
   // Actualizar badge de stock bajo periodicamente
   refreshLowStockBadge()

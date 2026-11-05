@@ -62,5 +62,7 @@ class StockAdjustment(BaseModel):
     lot_id: Optional[int] = None
     movement_type: MovementType
     quantity: float = Field(..., gt=0)
-    unit: UnitType
+    unit: Optional[UnitType] = None
+    direction: Optional[Literal["up", "down"]] = None
+    destination: Optional[Literal["consumo", "laboratorio"]] = None
     notes: Optional[str] = None

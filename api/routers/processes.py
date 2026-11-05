@@ -6,9 +6,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from schemas.process import ProcessCreate, ProcessStatusUpdate, WeighingUpdate
-from database.connection import get_db, rows_to_list, row_to_dict, generate_code
+from database.connection import get_db, rows_to_list, row_to_dict, generate_code, ensure_recipes_schema
 from routers.auth import get_current_user
 from services import sync_service
+from services.recipe_formula import FormulaError, liquidate_ingredient, machine_bath_ratio
 
 router = APIRouter(prefix="/processes", tags=["processes"])
 
@@ -56,6 +57,7 @@ def _calculate_water(bath_ratio: Optional[float], fiber_weight_kg: float) -> Opt
 def list_processes(
     status:   Optional[str] = Query(None),
     search:   Optional[str] = Query(None),
+    machine_id: Optional[int] = Query(None),
     limit:    int           = Query(50, ge=1, le=200),
     current_user: dict = Depends(get_current_user),
 ):
@@ -80,6 +82,9 @@ def list_processes(
     if search:
         query += " AND (p.batch_number LIKE ? OR r.name LIKE ?)"
         params += [f"%{search}%", f"%{search}%"]
+    if machine_id:
+        query += " AND p.machine_id = ?"
+        params.append(machine_id)
 
     query += " ORDER BY p.created_at DESC LIMIT ?"
     params.append(limit)
@@ -168,6 +173,7 @@ def get_process(process_id: int, current_user: dict = Depends(get_current_user))
 @router.post("", status_code=201)
 def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
+        ensure_recipes_schema(conn)
         recipe = row_to_dict(
             conn.execute(
                 "SELECT * FROM recipes WHERE id = ? AND is_active = 1 AND deleted_at IS NULL",
@@ -179,7 +185,13 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
 
         _ensure_process_columns(conn)
         batch_number = generate_code("batch")
-        water_liters = _calculate_water(recipe.get("bath_ratio_l_per_kg"), req.fiber_weight_kg)
+        machine = None
+        if req.machine_id:
+            machine = row_to_dict(
+                conn.execute("SELECT * FROM machines WHERE id = ?", (req.machine_id,)).fetchone()
+            )
+        bath_ratio = machine_bath_ratio(machine) or recipe.get("bath_ratio_l_per_kg")
+        water_liters = _calculate_water(bath_ratio, req.fiber_weight_kg)
         fiber_type = req.fiber_type or recipe.get("fiber_type")
         color_ref = req.color_reference or recipe.get("color_name") or recipe.get("color_reference")
 
@@ -198,22 +210,37 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
 
         # Crear registros de pesaje para cada ingrediente de la receta
         ingredients = conn.execute(
-            """SELECT ri.*, c.name AS chemical_name
+            """SELECT ri.*, c.name AS chemical_name, c.code AS chemical_code
                FROM recipe_ingredients ri
                JOIN chemicals c ON ri.chemical_id = c.id
                WHERE ri.recipe_id = ?
                ORDER BY ri.sort_order, ri.id""",
             (req.recipe_id,),
         ).fetchall()
+        pending = [
+            row["chemical_name"]
+            for row in ingredients
+            if str(row["chemical_code"] or "").startswith("TMP")
+        ]
+        if pending:
+            raise HTTPException(
+                status_code=409,
+                detail="Asocia estos productos temporales antes del proceso: " + ", ".join(pending),
+            )
 
         for ing in ingredients:
-            expected_qty = round(ing["quantity_per_kg"] * req.fiber_weight_kg, 3)
+            try:
+                expected_qty, weigh_unit = liquidate_ingredient(
+                    dict(ing), req.fiber_weight_kg, bath_ratio
+                )
+            except FormulaError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             conn.execute(
                 """INSERT INTO process_weighings
                    (process_id, recipe_ingredient_id, chemical_id,
                     expected_quantity, unit)
                    VALUES (?,?,?,?,?)""",
-                (process_id, ing["id"], ing["chemical_id"], expected_qty, ing["unit"]),
+                (process_id, ing["id"], ing["chemical_id"], expected_qty, weigh_unit),
             )
 
         # Log de creacion

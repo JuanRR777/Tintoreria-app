@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from typing import Optional
 
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from database.connection import get_db, rows_to_list
+from database.connection import get_db, rows_to_list, ensure_inventory_schema, ensure_recipes_schema
 from routers.auth import get_current_user
 from services.chemical_type import reclassify_otros
-from services.inventory_sync import WAREHOUSE, apply_open_receipts
+from services.csv_import import parse_inv_file
+from services.inventory_sync import WAREHOUSE, apply_inventory_snapshot, apply_open_receipts
 
 router = APIRouter(prefix="/stock", tags=["stock"])
 
@@ -115,6 +116,7 @@ def _pending_purchase(conn) -> list:
                       supplier, last_unit_price, last_unit_currency, stock_quantity
                FROM chemicals
                WHERE is_active = 1 AND deleted_at IS NULL
+                 AND code NOT LIKE 'TMP%'
                ORDER BY CASE procurement_status WHEN 'espera' THEN 0 WHEN 'pedido' THEN 1 ELSE 2 END, name""",
         ).fetchall()
     )
@@ -127,10 +129,36 @@ def _pending_purchase(conn) -> list:
     return _attach_occ_numbers(pending, occ_rows)
 
 
+@router.post("/import/inv")
+async def import_inventory(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """Carga el informe de bodega: item, nombre, kilos y lote. El precio llega despues por SOC."""
+    name = (file.filename or "").lower()
+    if name and not name.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser .csv")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="El archivo esta vacio")
+
+    payload = parse_inv_file(raw)
+    with get_db() as conn:
+        catalog = apply_inventory_snapshot(conn, payload["rows"], current_user.get("id"))
+    return {
+        "kind": "inv",
+        "imported": len(payload["rows"]),
+        "catalog": catalog,
+        "skipped": payload["skipped"],
+        "other_warehouse": payload["other_warehouse"],
+        "errors": payload["errors"],
+        "warehouse": WAREHOUSE,
+    }
+
+
 @router.get("/summary")
 def stock_summary(current_user: dict = Depends(get_current_user)):
     """Resumen de inventario: total de quimicos, alertas de stock bajo y proximos a vencer."""
     with get_db() as conn:
+        ensure_recipes_schema(conn)
+        ensure_inventory_schema(conn)
         apply_open_receipts(conn, current_user.get("id"))
         reclassify_otros(conn)
         totals = dict(
@@ -142,7 +170,8 @@ def stock_summary(current_user: dict = Depends(get_current_user)):
                      SUM(CASE WHEN procurement_status = 'espera' THEN 1 ELSE 0 END) AS waiting_count,
                      SUM(CASE WHEN procurement_status = 'pedido' THEN 1 ELSE 0 END) AS ordered_count
                    FROM chemicals
-                   WHERE is_active = 1 AND deleted_at IS NULL"""
+                   WHERE is_active = 1 AND deleted_at IS NULL
+                     AND code NOT LIKE 'TMP%'"""
             ).fetchone()
         )
 
@@ -151,6 +180,7 @@ def stock_summary(current_user: dict = Depends(get_current_user)):
                 """SELECT id, name, code, chemical_type, stock_quantity, min_stock_alert, unit
                    FROM chemicals
                    WHERE is_active = 1 AND deleted_at IS NULL
+                     AND code NOT LIKE 'TMP%'
                      AND stock_quantity <= min_stock_alert
                    ORDER BY (stock_quantity - min_stock_alert)""",
             ).fetchall()

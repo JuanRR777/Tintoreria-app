@@ -1,5 +1,6 @@
 import { chemicals as api, stock } from '../api.js'
 import { toast }      from '../components/toast.js'
+import { showError, showLoading, showSuccess, showWarning } from '../components/swal.js'
 import { openModal, closeModal, confirm } from '../components/modal.js'
 import { setPageHeader } from '../layout.js'
 
@@ -46,6 +47,8 @@ export async function showView(container, params = {}) {
     title: 'Quimicos',
     subtitle: 'Inventario de materias primas y auxiliares',
     actionsHtml: `
+      <input type="file" id="file-inv" accept=".csv,text/csv" hidden>
+      <button class="btn btn-secondary" id="btn-import-inv">Cargar inventario</button>
       <button class="btn btn-primary" id="btn-new-chemical">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Nuevo quimico
@@ -78,6 +81,9 @@ export async function showView(container, params = {}) {
   `
 
   document.getElementById('btn-new-chemical').onclick = () => openChemicalForm(null, reload)
+  const fileInv = document.getElementById('file-inv')
+  document.getElementById('btn-import-inv').onclick = () => fileInv.click()
+  fileInv.onchange = () => importInventoryCsv(fileInv, reload)
 
   const search   = document.getElementById('search-chemicals')
   if (params.search) search.value = params.search
@@ -410,7 +416,7 @@ function esc(value) {
 // Formulario quimico
 // ---------------------------------------------------------------------------
 
-function openChemicalForm(chemicalId, onSuccess) {
+export function openChemicalForm(chemicalId, onSuccess, { prefill = null } = {}) {
   const isEdit = chemicalId !== null
 
   const formHTML = `
@@ -491,10 +497,9 @@ function openChemicalForm(chemicalId, onSuccess) {
     <button class="btn btn-primary" id="cf-submit">${isEdit ? 'Guardar cambios' : 'Crear quimico'}</button>
   `
 
-  openModal(isEdit ? 'Editar quimico' : 'Nuevo quimico', formHTML, { footerHTML: footer })
+  openModal(isEdit ? 'Editar químico' : 'Nuevo químico', formHTML, { footerHTML: footer, drawer: true })
 
-  if (isEdit) {
-    api.get(chemicalId).then(c => {
+  const fill = (c) => {
       document.getElementById('cf-name').value     = c.name || ''
       document.getElementById('cf-code').value     = c.code || ''
       document.getElementById('cf-type').value     = c.chemical_type || ''
@@ -507,8 +512,9 @@ function openChemicalForm(chemicalId, onSuccess) {
       document.getElementById('cf-hazardous').checked = !!c.is_hazardous
       document.getElementById('cf-safety').value  = c.safety_notes || ''
       document.getElementById('cf-notes').value   = c.notes || ''
-    })
   }
+  if (isEdit) api.get(chemicalId).then(fill)
+  else if (prefill) fill(prefill)
 
   document.getElementById('cf-submit').onclick = async () => {
     const errEl  = document.getElementById('cf-error')
@@ -792,5 +798,51 @@ async function deleteChemical(id) {
     await reloadList()
   } catch (err) {
     toast.error(err.message)
+  }
+}
+
+export async function importInventoryCsv(input, onDone) {
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  const btn = document.getElementById('btn-import-inv')
+  if (btn) btn.disabled = true
+  showLoading({
+    title: 'Cargando inventario',
+    text: `Procesando ${file.name}. Item, nombre y kilos de bodega.`,
+  })
+  try {
+    const result = await stock.importInv(file)
+    if (onDone) await onDone({ resetPage: true })
+    const catalog = result.catalog || {}
+    const lines = [
+      `${result.imported ?? 0} lineas del informe`,
+      `${catalog.created || 0} quimicos nuevos, ${catalog.updated || 0} actualizados`,
+      `${catalog.lots || 0} lotes · ${catalog.kg || 0} kg`,
+      result.skipped ? `${result.skipped} lineas omitidas` : '',
+      result.other_warehouse ? `${result.other_warehouse} de otra bodega` : '',
+    ].filter(Boolean)
+    const errorLines = (result.errors || []).slice(0, 3)
+    const html = `
+      <p style="margin:0 0 10px;font-size:14px;color:#475569">Archivo <strong>${esc(file.name)}</strong></p>
+      <ul style="margin:0;padding-left:18px;text-align:left;font-size:13px;color:#334155;line-height:1.6">
+        ${lines.map((line) => `<li>${esc(line)}</li>`).join('')}
+        ${errorLines.map((line) => `<li>${esc(line)}</li>`).join('')}
+      </ul>
+      <p style="margin:10px 0 0;font-size:12px;color:#64748b">El precio queda en 0 hasta que entre por SOC.</p>`
+    if ((result.imported || 0) > 0 && !errorLines.length) {
+      await showSuccess({ title: 'Inventario cargado', html })
+    } else if ((result.imported || 0) > 0) {
+      await showWarning({ title: 'Inventario cargado con avisos', html })
+    } else {
+      await showWarning({ title: 'Sin lineas de inventario', html })
+    }
+  } catch (err) {
+    await showError({
+      title: 'No se pudo cargar el inventario',
+      text: err.message || 'Ocurrio un error inesperado.',
+    })
+  } finally {
+    if (btn) btn.disabled = false
   }
 }
