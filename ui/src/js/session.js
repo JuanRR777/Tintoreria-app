@@ -5,6 +5,7 @@ const ROLE_LABELS = {
   laboratorio: 'Laboratorio',
   produccion: 'Produccion',
   consulta: 'Consulta',
+  digitador: 'Digitador',
 }
 
 export function setSession(user) {

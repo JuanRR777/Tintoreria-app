@@ -10,6 +10,11 @@ from typing import Any, Callable, Optional
 
 TTL_SEC = 300
 _WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE)\b", re.I)
+# Stock, procesos y consecutivos cambian desde varias PCs. No se cachean.
+_VOLATILE = re.compile(
+    r"\b(chemicals|chemical_lots|stock_movements|code_sequences|processes|process_weighings|process_logs)\b",
+    re.I,
+)
 
 _lock = threading.Lock()
 _store: dict[tuple, tuple[float, Any]] = {}
@@ -51,6 +56,8 @@ def invalidate() -> None:
 
 def remember(sql: str, params: list | None, fetch: Callable[[], Any]) -> Any:
     """Devuelve cache o ejecuta fetch. Junta peticiones identicas en vuelo."""
+    if _VOLATILE.search(sql or ""):
+        return fetch()
     cached = get(sql, params)
     if cached is not None:
         return cached

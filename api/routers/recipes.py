@@ -232,18 +232,23 @@ def list_recipes(
         if not recipes:
             return recipes
         ids = [r["id"] for r in recipes]
-        placeholders = ",".join("?" * len(ids))
-        ings = rows_to_list(
-            conn.execute(
-                f"""SELECT ri.*, c.name AS chemical_name, c.code AS chemical_code, c.unit AS chemical_unit,
-                           c.chemical_type
-                    FROM recipe_ingredients ri
-                    JOIN chemicals c ON ri.chemical_id = c.id
-                    WHERE ri.recipe_id IN ({placeholders})
-                    ORDER BY ri.sort_order, ri.id""",
-                ids,
-            ).fetchall()
-        )
+        ings = []
+        for offset in range(0, len(ids), 80):
+            chunk = ids[offset:offset + 80]
+            placeholders = ",".join("?" * len(chunk))
+            ings.extend(
+                rows_to_list(
+                    conn.execute(
+                        f"""SELECT ri.*, c.name AS chemical_name, c.code AS chemical_code, c.unit AS chemical_unit,
+                                   c.chemical_type
+                            FROM recipe_ingredients ri
+                            JOIN chemicals c ON ri.chemical_id = c.id
+                            WHERE ri.recipe_id IN ({placeholders})
+                            ORDER BY ri.sort_order, ri.id""",
+                        chunk,
+                    ).fetchall()
+                )
+            )
     by_recipe: dict[int, list] = {}
     for ing in ings:
         decorate_ingredient(ing)
@@ -352,6 +357,21 @@ def update_recipe(recipe_id: int, req: RecipeUpdate, current_user: dict = Depend
         ).fetchone()
         if not exists:
             raise HTTPException(status_code=404, detail="Receta no encontrada")
+
+        if steps is not None or ingredients is not None:
+            used = conn.execute(
+                """SELECT 1
+                   FROM process_weighings pw
+                   JOIN recipe_ingredients ri ON ri.id = pw.recipe_ingredient_id
+                   WHERE ri.recipe_id = ?
+                   LIMIT 1""",
+                (recipe_id,),
+            ).fetchone()
+            if used:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Esta receta ya se usó en un proceso. Usa «Otro color» para crear una nueva hoja con la fórmula cambiada.",
+                )
 
         if data:
             set_clause = ", ".join(f"{k} = ?" for k in data)

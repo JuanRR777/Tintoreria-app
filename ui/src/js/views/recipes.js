@@ -162,10 +162,10 @@ function blankStageCurve() {
   return { ph: '', phases: [], notes: [] }
 }
 
-function curveToRecipeSteps(curve, fiber, colorDepth, processRoute) {
+function curveToRecipeSteps(curve, fiber, colorDepth, processRoute, stageList) {
   const steps = []
   let order = 1
-  for (const st of stagesFor(fiber, colorDepth, processRoute)) {
+  for (const st of stageList || stagesFor(fiber, colorDepth, processRoute)) {
     const meta = curve?.[st.id] || blankStageCurve()
     const ph = parseFloat(meta.ph)
     const phVal = Number.isFinite(ph) ? ph : undefined
@@ -549,6 +549,7 @@ function recipeCard(r) {
       </button>
       <footer class="rc-foot">
         <span class="${modified ? 'is-changed' : ''}" title="Creada ${esc(fmtRecipeDateCard(r.created_at))} · Modificada ${esc(fmtRecipeDateCard(r.updated_at))}">${modified ? 'Modificada' : 'Creada'} ${esc(when)}</span>
+        <button type="button" class="btn btn-secondary btn-sm" data-next-color="${r.id}">Otro color</button>
         <button type="button" class="btn btn-secondary btn-sm" data-edit="${r.id}">Editar</button>
         <button type="button" class="mc-more" data-more="${r.id}" aria-label="Más acciones">···</button>
       </footer>
@@ -581,7 +582,6 @@ function recipeStatusMenu(current) {
 function recipeMenuHtml() {
   return `
     <div class="mc-menu">
-      <button type="button" data-rc-act="copy">Duplicar</button>
       <button type="button" data-rc-act="delete" class="is-danger">Eliminar</button>
     </div>`
 }
@@ -591,7 +591,7 @@ function bindRecipeCards(container, items) {
 
   container.querySelectorAll('.rc-card').forEach((card) => {
     card.onclick = (e) => {
-      if (e.target.closest('[data-edit], [data-more], [data-status-recipe]')) return
+      if (e.target.closest('[data-edit], [data-more], [data-status-recipe], [data-next-color]')) return
       openRecipeDrawer(parseInt(card.dataset.view, 10))
     }
   })
@@ -603,16 +603,19 @@ function bindRecipeCards(container, items) {
       if (!r) return
       openFloatList(btn, recipeMenuHtml(), {
         onBind: (panel) => {
-          panel.querySelector('[data-rc-act="copy"]')?.addEventListener('click', () => {
-            closeFloatList()
-            copyRecipe(r.id)
-          })
           panel.querySelector('[data-rc-act="delete"]')?.addEventListener('click', () => {
             closeFloatList()
             deleteRecipe(r.id)
           })
         },
       })
+    }
+  })
+  container.querySelectorAll('[data-next-color]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation()
+      closeFloatList()
+      openNextColor(Number(btn.dataset.nextColor))
     }
   })
   container.querySelectorAll('[data-edit]').forEach((btn) => {
@@ -908,7 +911,7 @@ async function openRecipeDrawer(recipeId) {
     </div>
     <div class="rq-foot">
       <span class="rq-dates">Creada ${esc(fmtRecipeDateCard(recipe.created_at))}${modified ? ` · <b>Modificada ${esc(fmtRecipeDateCard(recipe.updated_at))}</b>` : ''}</span>
-      <button type="button" class="btn btn-secondary btn-sm" data-rd="copy">Duplicar</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-rd="copy">Otro color</button>
       <button type="button" class="btn btn-primary btn-sm" data-rd="edit">Editar receta</button>
     </div>`
 
@@ -933,7 +936,7 @@ async function openRecipeDrawer(recipeId) {
   }
   root.querySelector('[data-rd="copy"]').onclick = () => {
     closeRecipeDrawer()
-    copyRecipe(recipe.id)
+    openNextColor(recipe.id)
   }
 }
 
@@ -1946,18 +1949,501 @@ export async function openRecipeForm(recipeId, onSuccess, opts = {}) {
   if (restoredDraft) toast.info('Se recuperó el borrador de la receta')
 }
 
-async function copyRecipe(id) {
-  const ok = await confirm(
-    'Se crea una copia en desarrollo con la misma fórmula. Luego cambia referencia, título o color.',
-    'Duplicar receta',
-  )
-  if (!ok) return
+function loadCurve(recipe) {
+  const curve = mapWizardCurve(recipe.steps, recipe.fiber_type, recipe.color_depth, recipe.process_route)
+  const known = new Set(stageIdsFor(recipe.fiber_type, recipe.color_depth, recipe.process_route))
+  for (const s of recipe.steps || []) {
+    const stage = canonicalStage(s.bath_stage) || inferStageFromStepName(s.step_name)
+    if (!stage || known.has(stage)) continue
+    if (!curve[stage]) curve[stage] = blankStageCurve()
+    if (String(s.notes || '') === 'indicacion') {
+      curve[stage].notes.push({ uid: uid(), text: s.step_name || '' })
+      continue
+    }
+    const temp = s.temperature_c ?? ''
+    const duration = s.duration_min ?? ''
+    const ph = s.ph_target ?? ''
+    if (ph !== '' && ph != null && !curve[stage].ph) curve[stage].ph = ph
+    if (temp !== '' || duration !== '') curve[stage].phases.push({ uid: uid(), temp, duration })
+  }
+  return curve
+}
+
+async function openNextColor(sourceId) {
+  let base
+  let catalog = []
+  let library = []
   try {
-    const copy = await api.copy(id)
-    toast.success(`Copia ${copy.code} lista para editar`)
-    await loadRecipes()
-    openRecipeForm(copy.id, () => loadRecipes())
-  } catch (err) { toast.error(err.message) }
+    const [recipe, chems, all] = await Promise.all([
+      api.get(sourceId),
+      chemicals.list().catch(() => []),
+      api.list({}, { fresh: true }).catch(() => []),
+    ])
+    base = recipe
+    catalog = Array.isArray(chems) ? chems : []
+    library = Array.isArray(all) ? all : []
+  } catch (err) {
+    toast.error(err.message)
+    return
+  }
+
+  const state = {
+    base,
+    color: '',
+    ref: base.commercial_ref || '',
+    title: base.yarn_title || '',
+    fiber: base.fiber_type || '',
+    ingredients: (base.ingredients || []).map(mapWizardIng),
+    curve: loadCurve(base),
+    formulaOk: false,
+    saved: 0,
+    hint: 'Confirma la fórmula o marca que es igual a la hoja.',
+  }
+
+  openModal('Otro color', `<div id="nx-root"></div>`, {
+    drawer: true,
+    size: 'wide',
+    footerHTML: `
+      <button type="button" class="btn btn-secondary" id="nx-close">Cerrar</button>
+      <button type="button" class="btn btn-primary" id="nx-save" disabled>Guardar y siguiente hoja</button>`,
+  })
+
+  const root = () => document.getElementById('nx-root')
+  const stagesOf = () => {
+    const known = stageIdsFor(state.fiber, state.base.color_depth, state.base.process_route)
+    const extra = [...state.ingredients.map((i) => i.stage), ...Object.keys(state.curve || {})]
+      .filter((id) => id && !known.includes(id))
+    const ids = [...known, ...new Set(extra)]
+    return ids.map((id) => BATH_STAGES.find((s) => s.id === id)).filter(Boolean)
+  }
+
+  function readLines() {
+    const host = root()
+    if (!host) return
+    state.color = host.querySelector('#nx-color')?.value.trim() || ''
+    state.ref = host.querySelector('#nx-ref')?.value.trim() || ''
+    state.title = host.querySelector('#nx-title')?.value.trim() || ''
+    state.fiber = host.querySelector('#nx-fiber')?.value || ''
+    host.querySelectorAll('.nx-line').forEach((row) => {
+      const item = state.ingredients.find((i) => i.uid === row.dataset.uid)
+      if (!item) return
+      item.qty = row.querySelector('.nx-qty')?.value || ''
+      item.basis = row.querySelector('.nx-basis')?.value || item.basis
+      const name = row.querySelector('.nx-temp')
+      if (name) item.name = name.value
+    })
+    host.querySelectorAll('[data-nx-ph]').forEach((el) => {
+      const id = el.dataset.nxPh
+      if (!state.curve[id]) state.curve[id] = blankStageCurve()
+      state.curve[id].ph = el.value
+    })
+    host.querySelectorAll('.nx-phase').forEach((row) => {
+      const phase = state.curve[row.dataset.stage]?.phases?.find((p) => p.uid === row.dataset.uid)
+      if (!phase) return
+      phase.temp = row.querySelector('[data-nx-temp]')?.value ?? ''
+      phase.duration = row.querySelector('[data-nx-min]')?.value ?? ''
+    })
+    host.querySelectorAll('.nx-note').forEach((row) => {
+      const note = state.curve[row.dataset.stage]?.notes?.find((n) => n.uid === row.dataset.uid)
+      if (note) note.text = row.querySelector('[data-nx-note]')?.value ?? ''
+    })
+  }
+
+  function canSave() {
+    return Boolean(state.color.trim()) && state.formulaOk && state.ingredients.some((i) => Number(i.qty) > 0)
+  }
+
+  function paintSave() {
+    const btn = document.getElementById('nx-save')
+    if (btn) btn.disabled = !canSave()
+    const flag = root()?.querySelector('#nx-flag')
+    if (flag) {
+      flag.textContent = state.formulaOk ? 'Fórmula confirmada' : 'Fórmula sin confirmar'
+      flag.classList.toggle('is-ok', state.formulaOk)
+    }
+  }
+
+  function paint() {
+    const host = root()
+    if (!host) return
+    for (const st of stagesOf()) {
+      if (!state.curve[st.id]) state.curve[st.id] = blankStageCurve()
+    }
+    const stages = stagesOf()
+    const grouped = stages.map((st) => ({
+      ...st,
+      items: state.ingredients.filter((i) => (i.stage || 'tenido') === st.id),
+    }))
+    host.innerHTML = `
+      <div class="nx-sheet">
+        <p class="nx-lead">${state.saved ? `${state.saved} hoja${state.saved === 1 ? '' : 's'} guardada${state.saved === 1 ? '' : 's'}. ` : ''}Escribe el color de la hoja. La fórmula viene de la base: confírmala si es igual, o cambia la línea que sea distinta.</p>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Color <span class="required"></span></label>
+            <input id="nx-color" class="form-input" placeholder="Ej: 8770" value="${esc(state.color)}" autofocus>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Referencia</label>
+            <input id="nx-ref" class="form-input" value="${esc(state.ref)}" placeholder="Otra referencia cambia la base">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Título</label>
+            <input id="nx-title" class="form-input" value="${esc(state.title)}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Fibra</label>
+            <select id="nx-fiber" class="form-select">
+              <option value="">Sin fibra</option>
+              ${Object.entries(FIBER_LABELS).map(([id, label]) => `<option value="${id}" ${state.fiber === id ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <p class="form-hint" id="nx-hint">${esc(state.hint)}</p>
+        <div class="nx-formula">
+          <div class="nx-formula-h">
+            <strong>Fórmula</strong>
+            <span id="nx-flag" class="${state.formulaOk ? 'is-ok' : ''}">${state.formulaOk ? 'Fórmula confirmada' : 'Fórmula sin confirmar'}</span>
+            <button type="button" class="btn btn-secondary btn-sm" id="nx-same">La fórmula es igual</button>
+          </div>
+          ${grouped.map((st) => `
+            <section class="nx-block" data-stage-box="${esc(st.id)}">
+              <div class="nx-stage-h">
+                <p class="nx-stage">${esc(st.label)}</p>
+                <label class="nx-ph">pH
+                  <input class="form-input" data-nx-ph="${esc(st.id)}" type="number" min="0" max="14" step="0.01" placeholder="—" value="${esc((state.curve[st.id] || {}).ph || '')}">
+                </label>
+              </div>
+              <div class="nx-split">
+                <div class="nx-col">
+                  <div class="nx-add">
+                    <input class="form-input nx-add-q" data-nx-q="${esc(st.id)}" placeholder="Buscar o escribir producto" autocomplete="off">
+                    <button type="button" class="btn btn-secondary btn-sm" data-nx-add="${esc(st.id)}">Agregar</button>
+                  </div>
+                  <div class="nx-hits" data-nx-hits="${esc(st.id)}" hidden></div>
+                  ${st.items.map((i) => `
+                    <div class="nx-line" data-uid="${esc(i.uid)}">
+                      <input class="form-input nx-qty" type="number" min="0" step="0.001" value="${esc(i.qty)}">
+                      ${i.temporary
+                        ? `<input class="form-input nx-temp" value="${esc(i.name)}" placeholder="Producto">`
+                        : `<div class="nx-name"><strong>${esc(i.name)}</strong><code>${esc(i.code || '')}</code></div>`}
+                      <select class="form-select nx-basis">
+                        ${DOSE_BASES.map((d) => `<option value="${d.id}" ${i.basis === d.id ? 'selected' : ''}>${d.label}</option>`).join('')}
+                      </select>
+                      <button type="button" class="chem-icon-btn is-danger" data-nx-del="${esc(i.uid)}" title="Quitar">×</button>
+                    </div>`).join('')}
+                </div>
+                <div class="nx-col nx-curve">
+                  <div class="nx-curve-h"><span>°C</span><span>min</span></div>
+                  ${((state.curve[st.id] || {}).phases || []).map((p) => `
+                    <div class="nx-phase" data-uid="${esc(p.uid)}" data-stage="${esc(st.id)}">
+                      <div class="nx-metric">
+                        <input class="form-input" data-nx-temp type="number" min="0" step="1" value="${esc(p.temp)}" placeholder="80">
+                        <span>°C</span>
+                      </div>
+                      <span class="nx-dash">—</span>
+                      <div class="nx-metric">
+                        <input class="form-input" data-nx-min type="number" min="0" step="1" value="${esc(p.duration)}" placeholder="10">
+                        <span>min</span>
+                      </div>
+                      <button type="button" class="chem-icon-btn is-danger" data-nx-del-phase="${esc(p.uid)}" title="Quitar">×</button>
+                    </div>`).join('')}
+                  <button type="button" class="btn btn-secondary btn-sm nx-mini" style="justify-content: center; font-size: 14px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted);" data-nx-phase="${esc(st.id)}">+ Temperatura</button>
+                </div>
+              </div>
+              <div class="nx-notes">
+                ${((state.curve[st.id] || {}).notes || []).map((n) => `
+                  <div class="nx-note" data-uid="${esc(n.uid)}" data-stage="${esc(st.id)}">
+                    <input class="form-input" data-nx-note value="${esc(n.text || '')}" placeholder="Enfriar, drenar, lavar, dosificar…">
+                    <button type="button" class="chem-icon-btn is-danger" data-nx-del-note="${esc(n.uid)}" title="Quitar">×</button>
+                  </div>`).join('')}
+                <button type="button" class="btn btn-secondary btn-sm nx-mini" style="justify-content: center; font-size: 14px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted);" data-nx-note-add="${esc(st.id)}">+ Indicación</button>
+              </div>
+            </section>
+          `).join('')}
+        </div>
+      </div>`
+    host.querySelector('#nx-color').oninput = (e) => { state.color = e.target.value.trim(); paintSave() }
+    host.querySelector('#nx-title').oninput = (e) => { state.title = e.target.value.trim() }
+    host.querySelector('#nx-fiber').onchange = (e) => { state.fiber = e.target.value }
+    host.querySelector('#nx-ref').onchange = async (e) => {
+      const next = e.target.value.trim()
+      state.ref = next
+      await switchBase(next)
+    }
+    host.querySelectorAll('.nx-qty, .nx-basis, .nx-temp').forEach((el) => {
+      el.oninput = () => { readLines(); state.formulaOk = true; state.hint = 'Hay cambios en la fórmula.'; paintSave(); const hint = host.querySelector('#nx-hint'); if (hint) hint.textContent = state.hint }
+    })
+    host.querySelectorAll('[data-nx-del]').forEach((btn) => {
+      btn.onclick = () => {
+        readLines()
+        state.ingredients = state.ingredients.filter((i) => i.uid !== btn.dataset.nxDel)
+        state.formulaOk = true
+        state.hint = 'Quitaste un producto. Revisa el resto y guarda.'
+        paint()
+      }
+    })
+    host.querySelectorAll('[data-nx-ph], [data-nx-temp], [data-nx-min], [data-nx-note]').forEach((el) => {
+      el.oninput = () => {
+        readLines()
+        state.formulaOk = true
+        state.hint = 'Hay cambios en la curva de la etapa.'
+        const hint = host.querySelector('#nx-hint')
+        if (hint) hint.textContent = state.hint
+        paintSave()
+      }
+    })
+    host.querySelectorAll('[data-nx-phase]').forEach((btn) => {
+      btn.onclick = () => {
+        readLines()
+        const id = btn.dataset.nxPhase
+        if (!state.curve[id]) state.curve[id] = blankStageCurve()
+        const rowUid = uid()
+        state.curve[id].phases.push({ uid: rowUid, temp: '', duration: '' })
+        state.focusSel = `.nx-phase[data-uid="${rowUid}"] [data-nx-temp]`
+        state.formulaOk = true
+        state.hint = 'Agregaste una temperatura. Indica °C y minutos.'
+        paint()
+      }
+    })
+    host.querySelectorAll('[data-nx-del-phase]').forEach((btn) => {
+      btn.onclick = () => {
+        readLines()
+        Object.values(state.curve).forEach((c) => {
+          c.phases = (c.phases || []).filter((p) => p.uid !== btn.dataset.nxDelPhase)
+        })
+        state.formulaOk = true
+        paint()
+      }
+    })
+    host.querySelectorAll('[data-nx-note-add]').forEach((btn) => {
+      btn.onclick = () => {
+        readLines()
+        const id = btn.dataset.nxNoteAdd
+        if (!state.curve[id]) state.curve[id] = blankStageCurve()
+        const rowUid = uid()
+        state.curve[id].notes.push({ uid: rowUid, text: '' })
+        state.focusSel = `.nx-note[data-uid="${rowUid}"] [data-nx-note]`
+        state.formulaOk = true
+        state.hint = 'Agregaste una indicación.'
+        paint()
+      }
+    })
+    host.querySelectorAll('[data-nx-del-note]').forEach((btn) => {
+      btn.onclick = () => {
+        readLines()
+        Object.values(state.curve).forEach((c) => {
+          c.notes = (c.notes || []).filter((n) => n.uid !== btn.dataset.nxDelNote)
+        })
+        state.formulaOk = true
+        paint()
+      }
+    })
+    host.querySelector('#nx-same').onclick = () => {
+      readLines()
+      state.formulaOk = true
+      state.hint = 'Fórmula igual a la base. Solo cambia el color.'
+      const hint = host.querySelector('#nx-hint')
+      if (hint) hint.textContent = state.hint
+      paintSave()
+    }
+    host.querySelectorAll('[data-nx-q]').forEach((query) => {
+      const stage = query.dataset.nxQ
+      const hits = host.querySelector(`[data-nx-hits="${stage}"]`)
+      query.oninput = () => {
+        const q = query.value.trim().toLowerCase()
+        if (q.length < 2) { hits.hidden = true; hits.innerHTML = ''; return }
+        const found = catalog.filter((c) => `${c.name} ${c.code}`.toLowerCase().includes(q)).slice(0, 6)
+        hits.hidden = !found.length
+        hits.innerHTML = found.map((c) => `<button type="button" data-chem="${c.id}">${esc(c.name)} <code>${esc(c.code || '')}</code></button>`).join('')
+        hits.querySelectorAll('[data-chem]').forEach((btn) => {
+          btn.onclick = () => addChemical(catalog.find((c) => c.id === Number(btn.dataset.chem)), null, stage)
+        })
+      }
+    })
+    host.querySelectorAll('[data-nx-add]').forEach((btn) => {
+      btn.onclick = () => {
+        const stage = btn.dataset.nxAdd
+        const query = host.querySelector(`[data-nx-q="${stage}"]`)
+        const name = query?.value.trim() || ''
+        if (!name) return
+        const found = catalog.find((c) => c.name.toLowerCase() === name.toLowerCase() || String(c.code || '').toLowerCase() === name.toLowerCase())
+        if (found) addChemical(found, null, stage)
+        else addChemical(null, name, stage)
+      }
+    })
+    paintSave()
+    if (state.focusUid) {
+      const qty = host.querySelector(`.nx-line[data-uid="${state.focusUid}"] .nx-qty`)
+      state.focusUid = ''
+      if (qty) {
+        qty.focus()
+        qty.select()
+        return
+      }
+    }
+    if (state.focusSel) {
+      const el = host.querySelector(state.focusSel)
+      state.focusSel = ''
+      if (el) {
+        el.focus()
+        return
+      }
+    }
+    if (!state.color) host.querySelector('#nx-color')?.focus()
+  }
+
+  function addChemical(chem, tempName, stage = 'tenido') {
+    readLines()
+    const rowUid = uid()
+    const row = chem ? {
+      uid: rowUid,
+      chemical_id: chem.id,
+      name: chem.name,
+      code: chem.code || '',
+      unit: chem.unit || 'g',
+      qty: '',
+      stage,
+      basis: 'percent',
+      temporary: false,
+    } : {
+      uid: rowUid,
+      chemical_id: null,
+      name: String(tempName || '').toUpperCase(),
+      code: '',
+      unit: 'g',
+      qty: '',
+      stage,
+      basis: 'percent',
+      temporary: true,
+    }
+    const at = state.ingredients.findIndex((i) => (i.stage || 'tenido') === stage)
+    if (at === -1) state.ingredients.push(row)
+    else state.ingredients.splice(at, 0, row)
+    state.focusUid = rowUid
+    state.formulaOk = true
+    state.hint = 'Agregaste un producto. Indica su dosis.'
+    paint()
+  }
+
+  async function switchBase(ref) {
+    const key = ref.trim().toLowerCase()
+    if (!key || key === String(state.base.commercial_ref || '').trim().toLowerCase()) {
+      state.hint = 'Misma referencia. Sigue con el siguiente color.'
+      paint()
+      return
+    }
+    const hits = library.filter((r) => String(r.commercial_ref || '').trim().toLowerCase() === key)
+    const titled = hits.find((r) => String(r.yarn_title || '').trim().toLowerCase() === state.title.trim().toLowerCase())
+    const pick = titled || hits[0]
+    if (!pick) {
+      state.hint = 'No hay una receta con esa referencia. La fórmula actual se conserva.'
+      paint()
+      return
+    }
+    try {
+      const full = await api.get(pick.id)
+      state.base = full
+      state.ref = full.commercial_ref || ref
+      state.title = full.yarn_title || state.title
+      state.fiber = full.fiber_type || state.fiber
+      state.ingredients = (full.ingredients || []).map(mapWizardIng)
+      state.curve = loadCurve(full)
+      state.formulaOk = false
+      state.hint = `Base cambiada a ${full.color_name || full.code || 'esa referencia'}. Confirma la fórmula.`
+      paint()
+    } catch (err) {
+      toast.error(err.message)
+    }
+  }
+
+  async function save() {
+    readLines()
+    const errHost = root()?.querySelector('#nx-hint')
+    if (!state.color) {
+      if (errHost) errHost.textContent = 'Indica el color de la hoja.'
+      return
+    }
+    if (!state.formulaOk) {
+      if (errHost) errHost.textContent = 'Confirma la fórmula con “La fórmula es igual” o editando una línea.'
+      return
+    }
+    const usable = state.ingredients.filter((i) => Number(i.qty) > 0 && (i.chemical_id || (i.temporary && String(i.name || '').trim())))
+    if (!usable.length) {
+      if (errHost) errHost.textContent = 'Deja al menos un producto con dosis.'
+      return
+    }
+    const btn = document.getElementById('nx-save')
+    btn.disabled = true
+    try {
+      for (const ing of usable) {
+        if (!ing.temporary || ing.chemical_id) continue
+        const name = String(ing.name || '').trim().toUpperCase()
+        const created = await chemicals.create({
+          name,
+          code: `TMP${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`.toUpperCase(),
+          chemical_type: 'otros',
+          unit: 'kg',
+          notes: 'Producto temporal de fórmula',
+        })
+        ing.chemical_id = created.id
+        ing.code = created.code || ''
+        ing.name = name
+      }
+      const unitFor = (basis, fallback) => (basis === 'percent' ? '%' : basis === 'g_l' ? 'g/L' : (fallback || 'g'))
+      const steps = curveToRecipeSteps(state.curve, state.fiber, state.base.color_depth, state.base.process_route, stagesOf())
+      const maxTemp = steps.reduce((m, s) => Math.max(m, Number(s.temperature_c) || 0), 0)
+      const mins = steps.reduce((s, p) => s + (Number(p.duration_min) || 0), 0)
+      const created = await api.create({
+        name: composeRecipeName(state.ref, state.title, state.color),
+        fiber_type: state.fiber || undefined,
+        color_name: state.color,
+        color_reference: state.color,
+        yarn_title: state.title,
+        commercial_ref: state.ref,
+        color_depth: state.fiber === 'acrilico' ? (state.base.color_depth || 'oscuros') : null,
+        process_route: state.fiber === 'algodon' ? (state.base.process_route || 'preblanqueo') : null,
+        temperature_c: maxTemp || undefined,
+        process_time_min: mins || undefined,
+        notes: state.base.notes || undefined,
+        status: 'development',
+        steps,
+        ingredients: usable.map((i, idx) => ({
+          chemical_id: i.chemical_id || undefined,
+          temp_name: i.temporary ? String(i.name || '').trim().toUpperCase() : undefined,
+          quantity_per_kg: Number(i.qty),
+          unit: unitFor(i.basis, i.unit),
+          dose_basis: i.basis || 'percent',
+          sort_order: idx,
+          bath_stage: i.stage,
+          notes: i.stage,
+        })),
+      })
+      state.saved += 1
+      state.color = ''
+      state.formulaOk = false
+      state.hint = `Se guardó ${created.code || 'la hoja'}. Escribe el siguiente color o cambia la referencia.`
+      library.push({
+        id: created.id,
+        commercial_ref: state.ref,
+        yarn_title: state.title,
+        color_name: created.color_name,
+        code: created.code,
+      })
+      toast.success(`Hoja ${created.code || ''} guardada`.trim())
+      loadRecipes()
+      paint()
+    } catch (err) {
+      if (errHost) errHost.textContent = err.message
+      toast.error(err.message)
+      paintSave()
+    }
+  }
+
+  document.getElementById('nx-close').onclick = () => closeModal()
+  document.getElementById('nx-save').onclick = save
+  paint()
 }
 
 async function deleteRecipe(id) {

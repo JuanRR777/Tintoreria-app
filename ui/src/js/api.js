@@ -42,7 +42,9 @@ export function clearApiCache() {
 }
 
 async function request(method, path, body = null, opts = {}) {
-  if (method === 'GET' && !opts.fresh) {
+  const pathOnly = String(path).split('?')[0]
+  const volatile = /^\/(processes|chemicals|stock|requests)(\/|$)/.test(pathOnly)
+  if (method === 'GET' && !opts.fresh && !volatile) {
     const cached = cacheGet(path)
     if (cached !== null) return cached
     if (_inflight.has(path)) return clone(await _inflight.get(path))
@@ -123,7 +125,7 @@ export const chemicals = {
 }
 
 export const recipes = {
-  list:             (params = {}) => api.get('/recipes' + toQuery(params)),
+  list:             (params = {}, opts = {}) => api.get('/recipes' + toQuery(params), opts),
   get:              (id)          => api.get(`/recipes/${id}`),
   create:           (d)           => api.post('/recipes', d),
   update:           (id, d)       => api.put(`/recipes/${id}`, d),

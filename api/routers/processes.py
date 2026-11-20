@@ -6,10 +6,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from schemas.process import ProcessCreate, ProcessStatusUpdate, WeighingUpdate
-from database.connection import get_db, rows_to_list, row_to_dict, generate_code, ensure_recipes_schema
+from database.connection import get_db, rows_to_list, row_to_dict, generate_code, ensure_recipes_schema, ensure_inventory_schema
 from routers.auth import get_current_user
 from services import sync_service
 from services.recipe_formula import FormulaError, liquidate_ingredient, machine_bath_ratio
+from services.units import convert_qty
 
 router = APIRouter(prefix="/processes", tags=["processes"])
 
@@ -33,11 +34,24 @@ _SUGGESTED_LOT_SQL = """
 """
 
 
+_process_columns_ready = False
+
+
 def _ensure_process_columns(conn) -> None:
-    try:
-        conn.execute("ALTER TABLE processes ADD COLUMN scheduled_at TEXT")
-    except Exception:
-        pass
+    global _process_columns_ready
+    if _process_columns_ready:
+        return
+    columns = {
+        str(row.get("name"))
+        for row in conn.execute("PRAGMA table_info(processes)").fetchall()
+        if row.get("name")
+    }
+    if "scheduled_at" not in columns:
+        try:
+            conn.execute("ALTER TABLE processes ADD COLUMN scheduled_at TEXT")
+        except Exception:
+            pass
+    _process_columns_ready = True
 
 
 def _attach_weigh_totals(process: dict, weighings: list) -> dict:
@@ -95,19 +109,24 @@ def list_processes(
         if not rows:
             return rows
         ids = [r["id"] for r in rows]
-        placeholders = ",".join("?" * len(ids))
-        weigh_rows = rows_to_list(
-            conn.execute(
-                f"""SELECT pw.id, pw.process_id, pw.status, pw.expected_quantity, pw.unit, pw.actual_quantity,
-                           c.name AS chemical_name, c.code AS chemical_code,
-                           {_SUGGESTED_LOT_SQL}
-                    FROM process_weighings pw
-                    JOIN chemicals c ON pw.chemical_id = c.id
-                    WHERE pw.process_id IN ({placeholders})
-                    ORDER BY pw.id""",
-                ids,
-            ).fetchall()
-        )
+        weigh_rows = []
+        for offset in range(0, len(ids), 80):
+            chunk = ids[offset:offset + 80]
+            placeholders = ",".join("?" * len(chunk))
+            weigh_rows.extend(
+                rows_to_list(
+                    conn.execute(
+                        f"""SELECT pw.id, pw.process_id, pw.status, pw.expected_quantity, pw.unit, pw.actual_quantity,
+                                   c.name AS chemical_name, c.code AS chemical_code,
+                                   {_SUGGESTED_LOT_SQL}
+                            FROM process_weighings pw
+                            JOIN chemicals c ON pw.chemical_id = c.id
+                            WHERE pw.process_id IN ({placeholders})
+                            ORDER BY pw.id""",
+                        chunk,
+                    ).fetchall()
+                )
+            )
     by_proc: dict[int, list] = {}
     for w in weigh_rows:
         by_proc.setdefault(w["process_id"], []).append(w)
@@ -184,7 +203,6 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
             raise HTTPException(status_code=404, detail="Receta no encontrada")
 
         _ensure_process_columns(conn)
-        batch_number = generate_code("batch")
         machine = None
         if req.machine_id:
             machine = row_to_dict(
@@ -195,20 +213,6 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
         fiber_type = req.fiber_type or recipe.get("fiber_type")
         color_ref = req.color_reference or recipe.get("color_name") or recipe.get("color_reference")
 
-        conn.execute(
-            """INSERT INTO processes
-               (batch_number, recipe_id, machine_id, fiber_type, fiber_weight_kg,
-                water_volume_liters, color_reference, operator_id, notes, scheduled_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (
-                batch_number, req.recipe_id, req.machine_id, fiber_type,
-                req.fiber_weight_kg, water_liters, color_ref,
-                current_user["id"], req.notes, req.scheduled_at,
-            ),
-        )
-        process_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Crear registros de pesaje para cada ingrediente de la receta
         ingredients = conn.execute(
             """SELECT ri.*, c.name AS chemical_name, c.code AS chemical_code
                FROM recipe_ingredients ri
@@ -227,7 +231,7 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
                 status_code=409,
                 detail="Asocia estos productos temporales antes del proceso: " + ", ".join(pending),
             )
-
+        planned = []
         for ing in ingredients:
             try:
                 expected_qty, weigh_unit = liquidate_ingredient(
@@ -235,22 +239,42 @@ def create_process(req: ProcessCreate, current_user: dict = Depends(get_current_
                 )
             except FormulaError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            conn.execute(
+            planned.append((ing["id"], ing["chemical_id"], expected_qty, weigh_unit))
+
+        batch_number = generate_code("batch")
+        statements = [(
+            """INSERT INTO processes
+               (batch_number, recipe_id, machine_id, fiber_type, fiber_weight_kg,
+                water_volume_liters, color_reference, operator_id, notes, scheduled_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                batch_number, req.recipe_id, req.machine_id, fiber_type,
+                req.fiber_weight_kg, water_liters, color_ref,
+                current_user["id"], req.notes, req.scheduled_at,
+            ),
+        )]
+        for ingredient_id, chemical_id, expected_qty, weigh_unit in planned:
+            statements.append((
                 """INSERT INTO process_weighings
-                   (process_id, recipe_ingredient_id, chemical_id,
-                    expected_quantity, unit)
-                   VALUES (?,?,?,?,?)""",
-                (process_id, ing["id"], ing["chemical_id"], expected_qty, weigh_unit),
-            )
-
-        # Log de creacion
-        conn.execute(
+                   (process_id, recipe_ingredient_id, chemical_id, expected_quantity, unit)
+                   SELECT id, ?, ?, ?, ? FROM processes WHERE batch_number = ?""",
+                (ingredient_id, chemical_id, expected_qty, weigh_unit, batch_number),
+            ))
+        statements.append((
             """INSERT INTO process_logs (process_id, event_type, description, user_id)
-               VALUES (?, 'create', ?, ?)""",
-            (process_id, f"Proceso creado. Lote: {batch_number}. Fibra: {req.fiber_weight_kg} kg", current_user["id"]),
-        )
-
-        row = conn.execute("SELECT * FROM processes WHERE id = ?", (process_id,)).fetchone()
+               SELECT id, 'create', ?, ? FROM processes WHERE batch_number = ?""",
+            (
+                f"Proceso creado. Lote: {batch_number}. Fibra: {req.fiber_weight_kg} kg",
+                current_user["id"],
+                batch_number,
+            ),
+        ))
+        conn.batch(statements)
+        row = conn.execute(
+            "SELECT * FROM processes WHERE batch_number = ?",
+            (batch_number,),
+        ).fetchone()
+        process_id = row["id"]
 
     process = row_to_dict(row)
     sync_service.enqueue("process", process_id, "create", process)
@@ -270,90 +294,140 @@ def update_process_status(
         if not current:
             raise HTTPException(status_code=404, detail="Proceso no encontrado")
 
-        updates: dict = {"status": req.status}
-
-        if req.status == "in_progress" and not current.get("started_at"):
-            updates["started_at"] = "datetime('now')"
-        if req.status == "completed":
-            updates["completed_at"] = "datetime('now')"
-            if req.quality_score is not None:
-                updates["quality_score"] = req.quality_score
-            # Descontar stock por cada pesaje validado
-            _deduct_stock(conn, process_id, current_user["id"])
-            # Encolar para sync
+        if req.status == "completed" and current.get("status") != "completed":
+            _complete_process(conn, process_id, current_user["id"], req)
             sync_service.enqueue("process", process_id, "update", {"id": process_id, "status": "completed"})
+            row = conn.execute("SELECT * FROM processes WHERE id = ?", (process_id,)).fetchone()
+            return row_to_dict(row)
 
+        updates: dict = {}
+        if not (req.status == "completed" and current.get("status") == "completed"):
+            updates["status"] = req.status
+            if req.status == "in_progress" and not current.get("started_at"):
+                updates["started_at"] = "datetime('now')"
+
+        if req.quality_score is not None:
+            updates["quality_score"] = req.quality_score
         if req.notes:
             updates["notes"] = req.notes
 
-        # Construir SET dinamico respetando funciones SQL
-        set_parts = []
-        params = []
-        for key, val in updates.items():
-            if isinstance(val, str) and val.startswith("datetime("):
-                set_parts.append(f"{key} = {val}")
-            else:
-                set_parts.append(f"{key} = ?")
-                params.append(val)
+        if updates:
+            set_parts = []
+            params = []
+            for key, val in updates.items():
+                if isinstance(val, str) and val.startswith("datetime("):
+                    set_parts.append(f"{key} = {val}")
+                else:
+                    set_parts.append(f"{key} = ?")
+                    params.append(val)
+            set_parts.append("updated_at = datetime('now')")
+            params.append(process_id)
+            conn.execute(
+                f"UPDATE processes SET {', '.join(set_parts)} WHERE id = ?",
+                params,
+            )
 
-        set_parts.append("updated_at = datetime('now')")
-        params.append(process_id)
-
-        conn.execute(
-            f"UPDATE processes SET {', '.join(set_parts)} WHERE id = ?",
-            params,
-        )
-
-        event_map = {
-            "in_progress": "start",
-            "paused": "pause",
-            "completed": "complete",
-            "cancelled": "cancel",
-        }
-        event = event_map.get(req.status, req.status)
-        conn.execute(
-            "INSERT INTO process_logs (process_id, event_type, description, user_id) VALUES (?,?,?,?)",
-            (process_id, event, req.notes or f"Estado cambiado a {req.status}", current_user["id"]),
-        )
+        if current.get("status") != "completed":
+            event_map = {
+                "in_progress": "start",
+                "paused": "pause",
+                "completed": "complete",
+                "cancelled": "cancel",
+            }
+            event = event_map.get(req.status, req.status)
+            conn.execute(
+                "INSERT INTO process_logs (process_id, event_type, description, user_id) VALUES (?,?,?,?)",
+                (process_id, event, req.notes or f"Estado cambiado a {req.status}", current_user["id"]),
+            )
 
         row = conn.execute("SELECT * FROM processes WHERE id = ?", (process_id,)).fetchone()
 
     return row_to_dict(row)
 
 
-def _deduct_stock(conn, process_id: int, user_id: int) -> None:
-    """Descuenta el stock de cada pesaje completado del proceso."""
+def _stock_qty(weighing, stock_unit: str) -> float:
+    raw = weighing["actual_quantity"] or weighing["expected_quantity"]
+    source = (weighing["unit"] or stock_unit or "kg").strip()
+    target = (stock_unit or "kg").strip()
+    converted = convert_qty(raw, source, target)
+    if converted is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No se puede descontar {source} sobre un producto en {target}",
+        )
+    return converted
+
+
+def _complete_process(conn, process_id: int, user_id: int, req: ProcessStatusUpdate) -> None:
+    """Cierra el proceso y descuenta bodega una sola vez, en la unidad del producto."""
+    ensure_inventory_schema(conn)
     weighings = conn.execute(
-        "SELECT * FROM process_weighings WHERE process_id = ? AND status IN ('weighed','validated')",
+        """SELECT pw.*, c.unit AS stock_unit, c.name AS chemical_name
+           FROM process_weighings pw
+           JOIN chemicals c ON c.id = pw.chemical_id
+           WHERE pw.process_id = ? AND pw.status IN ('weighed','validated')""",
         (process_id,),
     ).fetchall()
 
-    for w in weighings:
-        qty = w["actual_quantity"] or w["expected_quantity"]
-        if not qty:
+    open_guard = "EXISTS (SELECT 1 FROM processes WHERE id = ? AND status != 'completed')"
+    statements = []
+    for weighing in weighings:
+        raw = weighing["actual_quantity"] or weighing["expected_quantity"]
+        if not raw:
             continue
+        stock_unit = weighing["stock_unit"] or "kg"
+        qty = _stock_qty(weighing, stock_unit)
+        source = (weighing["unit"] or stock_unit).strip()
+        note = f"Consumo proceso #{process_id}"
+        if source != stock_unit:
+            note = f"{note} ({float(raw):g} {source})"
+        if weighing["lot_id"]:
+            statements.append((
+                f"""UPDATE chemical_lots
+                    SET quantity_remaining = MAX(0, quantity_remaining - ?),
+                        updated_at = datetime('now')
+                    WHERE id = ? AND {open_guard}""",
+                (qty, weighing["lot_id"], process_id),
+            ))
+            statements.append((
+                f"""UPDATE chemical_lots
+                    SET status = CASE
+                      WHEN quantity_remaining <= 0.000001 AND COALESCE(lab_quantity, 0) <= 0.000001 THEN 'depleted'
+                      ELSE 'active'
+                    END
+                    WHERE id = ? AND {open_guard}""",
+                (weighing["lot_id"], process_id),
+            ))
+        statements.append((
+            f"""UPDATE chemicals
+                SET stock_quantity = MAX(0, stock_quantity - ?), updated_at = datetime('now')
+                WHERE id = ? AND {open_guard}""",
+            (qty, weighing["chemical_id"], process_id),
+        ))
+        statements.append((
+            f"""INSERT INTO stock_movements
+                (chemical_id, lot_id, movement_type, quantity, unit, reference_type, reference_id, notes, user_id)
+                SELECT ?, ?, 'out', ?, ?, 'process', ?, ?, ?
+                WHERE {open_guard}""",
+            (weighing["chemical_id"], weighing["lot_id"], qty, stock_unit, process_id, note, user_id, process_id),
+        ))
 
-        if w["lot_id"]:
-            conn.execute(
-                "UPDATE chemical_lots SET quantity_remaining = MAX(0, quantity_remaining - ?), updated_at = datetime('now') WHERE id = ?",
-                (qty, w["lot_id"]),
-            )
-            # Actualizar status del lote si se agoto
-            lot = conn.execute("SELECT quantity_remaining FROM chemical_lots WHERE id = ?", (w["lot_id"],)).fetchone()
-            if lot and lot["quantity_remaining"] <= 0:
-                conn.execute("UPDATE chemical_lots SET status = 'depleted' WHERE id = ?", (w["lot_id"],))
-
+    statements.append((
+        """UPDATE processes
+           SET status = 'completed',
+               completed_at = datetime('now'),
+               quality_score = COALESCE(?, quality_score),
+               notes = COALESCE(?, notes),
+               updated_at = datetime('now')
+           WHERE id = ? AND status != 'completed'""",
+        (req.quality_score, req.notes, process_id),
+    ))
+    results = conn.batch(statements)
+    changes = ((results[-1].get("meta") or {}).get("changes") if results else 0) or 0
+    if changes:
         conn.execute(
-            "UPDATE chemicals SET stock_quantity = MAX(0, stock_quantity - ?), updated_at = datetime('now') WHERE id = ?",
-            (qty, w["chemical_id"]),
-        )
-
-        conn.execute(
-            """INSERT INTO stock_movements
-               (chemical_id, lot_id, movement_type, quantity, unit, reference_type, reference_id, notes, user_id)
-               VALUES (?,?,'out',?,?,'process',?,?,?)""",
-            (w["chemical_id"], w["lot_id"], qty, w["unit"],
-             process_id, f"Consumo proceso #{process_id}", user_id),
+            "INSERT INTO process_logs (process_id, event_type, description, user_id) VALUES (?,?,?,?)",
+            (process_id, "complete", req.notes or "Estado cambiado a completed", user_id),
         )
 
 

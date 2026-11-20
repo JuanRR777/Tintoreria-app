@@ -88,14 +88,21 @@ class D1Client:
         self._http = httpx.Client(timeout=30.0)
 
     def query(self, sql: str, params: list) -> dict:
+        return self._post("/query", {"sql": sql, "params": params})
+
+    def batch(self, statements: list) -> list:
+        payload = self._post("/batch", {"statements": statements})
+        return payload.get("results") or []
+
+    def _post(self, path: str, body: dict) -> dict:
         try:
             response = self._http.post(
-                f"{self.base_url}/query",
+                f"{self.base_url}{path}",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={"sql": sql, "params": params},
+                json=body,
             )
         except httpx.RequestError as exc:
             raise D1Error(f"No se pudo conectar con el Worker D1: {exc}") from exc
@@ -130,6 +137,23 @@ class D1Connection:
 
     def rollback(self) -> None:
         return None
+
+    def batch(self, statements: list) -> list:
+        """Ejecuta varias sentencias en una sola transacción del Worker."""
+        if not statements:
+            return []
+        d1_cache.invalidate()
+        payload = [
+            {"sql": sql.strip(), "params": list(params or [])}
+            for sql, params in statements
+        ]
+        results = self.client.batch(payload)
+        for statement, result in zip(payload, results):
+            if re.match(r"^\s*(INSERT|REPLACE)\b", statement["sql"], re.I):
+                last_id = (result.get("meta") or {}).get("last_row_id")
+                if last_id is not None:
+                    self.lastrowid = last_id
+        return results
 
     def close(self) -> None:
         return None
@@ -169,9 +193,18 @@ def init_db() -> None:
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count == 0:
             _seed(conn)
+        _ensure_digitador_role(conn)
         ensure_machines_schema(conn)
         ensure_recipes_schema(conn)
         ensure_users_schema(conn)
+
+
+def _ensure_digitador_role(conn: D1Connection) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO roles (name, display_name, description, permissions)
+           VALUES ('digitador', 'Digitador', 'Digitaliza recetas', ?)""",
+        ('["stock","recipes"]',),
+    )
 
 
 def _seed(conn: D1Connection) -> None:
@@ -184,6 +217,7 @@ def _seed(conn: D1Connection) -> None:
         (2, "laboratorio", "Personal Laboratorio", "Gestion de quimicos y recetas", '["dashboard","lab","quimicos.all","recetas.all","procesos.all","maquinas.read"]'),
         (3, "produccion", "Personal Produccion", "Ejecucion de procesos", '["dashboard","procesos.all","quimicos.read","recetas.read"]'),
         (4, "consulta", "Consulta", "Solo lectura y reportes", '["dashboard","reportes.all"]'),
+        (5, "digitador", "Digitador", "Digitaliza recetas", '["stock","recipes"]'),
     ]
     conn.executemany(
         "INSERT OR IGNORE INTO roles (id, name, display_name, description, permissions) VALUES (?,?,?,?,?)",
@@ -244,13 +278,23 @@ def _apply_machines_schema(conn: D1Connection) -> None:
     )
 
 
-def ensure_machines_schema(conn: Optional[D1Connection] = None) -> None:
-    """Agrega columnas nuevas de máquina si el D1 aún no tiene la migración 0006."""
+_schema_ready: set[str] = set()
+
+
+def _ensure_once(name: str, apply, conn: Optional[D1Connection]) -> None:
+    if name in _schema_ready:
+        return
     if conn is None:
         with get_db() as owned:
-            _apply_machines_schema(owned)
-        return
-    _apply_machines_schema(conn)
+            apply(owned)
+    else:
+        apply(conn)
+    _schema_ready.add(name)
+
+
+def ensure_machines_schema(conn: Optional[D1Connection] = None) -> None:
+    """Agrega columnas nuevas de máquina si el D1 aún no tiene la migración 0006."""
+    _ensure_once("machines", _apply_machines_schema, conn)
 
 
 def _apply_recipes_schema(conn: D1Connection) -> None:
@@ -308,44 +352,36 @@ def _apply_inventory_schema(conn: D1Connection) -> None:
 
 def ensure_inventory_schema(conn: Optional[D1Connection] = None) -> None:
     """Separa el saldo de laboratorio del saldo de bodega."""
-    if conn is None:
-        with get_db() as owned:
-            _apply_inventory_schema(owned)
-        return
-    _apply_inventory_schema(conn)
+    _ensure_once("inventory", _apply_inventory_schema, conn)
 
 
 def ensure_users_schema(conn: Optional[D1Connection] = None) -> None:
     """Agrega el tiempo de sesión por usuario si la base aún no tiene la columna."""
-    if conn is None:
-        with get_db() as owned:
-            _apply_users_schema(owned)
-        return
-    _apply_users_schema(conn)
+    _ensure_once("users", _apply_users_schema, conn)
 
 
 def ensure_recipes_schema(conn: Optional[D1Connection] = None) -> None:
     """Agrega título, referencia comercial y base de dosis si falta la migración 0008."""
-    if conn is None:
-        with get_db() as owned:
-            _apply_recipes_schema(owned)
-        return
-    _apply_recipes_schema(conn)
+    _ensure_once("recipes", _apply_recipes_schema, conn)
 
 
 def generate_code(sequence_type: str) -> str:
-    """Genera el siguiente codigo autoincrementado para el tipo dado."""
+    """Reserva el siguiente código. Dos PCs no pueden tomar el mismo valor."""
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT current_value, prefix, digits FROM code_sequences WHERE sequence_type = ?",
-            (sequence_type,),
-        ).fetchone()
-        if not row:
-            raise ValueError(f"Tipo de secuencia '{sequence_type}' no encontrado")
-
-        code = f"{row['prefix']}{str(row['current_value']).zfill(row['digits'])}"
-        conn.execute(
-            "UPDATE code_sequences SET current_value = current_value + 1, updated_at = datetime('now') WHERE sequence_type = ?",
-            (sequence_type,),
-        )
-        return code
+        for _ in range(5):
+            row = conn.execute(
+                "SELECT current_value, prefix, digits FROM code_sequences WHERE sequence_type = ?",
+                (sequence_type,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Tipo de secuencia '{sequence_type}' no encontrado")
+            current = int(row["current_value"])
+            updated = conn.execute(
+                """UPDATE code_sequences
+                   SET current_value = ?, updated_at = datetime('now')
+                   WHERE sequence_type = ? AND current_value = ?""",
+                (current + 1, sequence_type, current),
+            )
+            if updated.rowcount == 1:
+                return f"{row['prefix']}{str(current).zfill(int(row['digits']))}"
+    raise RuntimeError(f"No se pudo reservar el consecutivo de {sequence_type}")

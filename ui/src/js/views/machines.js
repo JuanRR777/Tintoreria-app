@@ -4,7 +4,7 @@ import { openModal, closeModal, confirm } from '../components/modal.js'
 import { setPageHeader } from '../layout.js'
 import { closeFloatList, isFloatListOpen, openFloatList } from '../components/float-list.js'
 
-const MACHINE_SLOTS = 12
+const MACHINE_SLOTS = 14
 
 export async function showView(container) {
   setPageHeader({

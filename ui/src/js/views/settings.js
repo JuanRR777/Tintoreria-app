@@ -28,9 +28,7 @@ export async function showView(container) {
   })
   const sections = isAdmin()
     ? SETTINGS_SECTIONS
-    : SETTINGS_SECTIONS.map((s) => (
-      s.id === 'users' ? { ...s, title: 'Seguridad', desc: 'Contraseña y sesión' } : s
-    ))
+    : SETTINGS_SECTIONS.filter((s) => s.id !== 'users')
   container.innerHTML = `
     <div class="settings-layout">
       <nav class="settings-nav" id="settings-nav" aria-label="Secciones de configuracion">
@@ -665,10 +663,7 @@ function renderOwnSecurity(c) {
 // ---------------------------------------------------------------------------
 
 async function renderUsers(c) {
-  if (!isAdmin()) {
-    renderOwnSecurity(c)
-    return
-  }
+  if (!isAdmin()) return
   c.innerHTML = `
     <div class="settings-section-head">
       <h2 class="settings-section-title">Usuarios</h2>

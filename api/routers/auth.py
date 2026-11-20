@@ -118,6 +118,13 @@ def assert_idle_minutes(minutes: int) -> int:
     return minutes
 
 
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    perms = json.loads(current_user.get("permissions") or "[]")
+    if "*" not in perms:
+        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
+    return current_user
+
+
 def assert_strong_password(password: str) -> None:
     ok = (
         len(password) >= 8
@@ -133,7 +140,7 @@ def assert_strong_password(password: str) -> None:
 
 
 @router.post("/change-password")
-def change_password(req: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+def change_password(req: ChangePasswordRequest, current_user: dict = Depends(require_admin)):
     assert_strong_password(req.new_password)
     if not verify_password(req.current_password, current_user["password_hash"]):
         raise HTTPException(status_code=400, detail="Contrasena actual incorrecta")
@@ -150,14 +157,6 @@ def change_password(req: ChangePasswordRequest, current_user: dict = Depends(get
 # ---------------------------------------------------------------------------
 # Gestion de usuarios (solo admin)
 # ---------------------------------------------------------------------------
-
-def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    import json
-    perms = json.loads(current_user.get("permissions") or "[]")
-    if "*" not in perms:
-        raise HTTPException(status_code=403, detail="Se requieren permisos de administrador")
-    return current_user
-
 
 @router.get("/users")
 def list_users(current_user: dict = Depends(require_admin)):
