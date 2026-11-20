@@ -129,6 +129,37 @@ def _pending_purchase(conn) -> list:
     return _attach_occ_numbers(pending, occ_rows)
 
 
+def physical_count_block(conn) -> Optional[str]:
+    """El informe de SIESA reemplaza el stock de Principal. No se deja importar
+    mientras un conteo físico del portal web lo pisaría."""
+    try:
+        row = conn.execute(
+            """SELECT c.id, c.status
+               FROM inventory_counts c
+               JOIN warehouses w ON w.id = c.warehouse_id
+               WHERE w.kind = 'principal'
+                 AND (c.status IN ('abierto', 'revision')
+                      OR (c.status = 'aplicado' AND c.siesa_adjusted_at IS NULL))
+               ORDER BY c.id DESC LIMIT 1"""
+        ).fetchone()
+    except Exception as exc:
+        # Una base sin las tablas del portal web no tiene conteos que proteger.
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    if not row:
+        return None
+    if row["status"] == "aplicado":
+        return (
+            f"El conteo físico #{row['id']} ya se aplicó, pero falta marcarlo como ajustado en SIESA "
+            "en el portal web. Importar ahora reemplazaría lo contado."
+        )
+    return (
+        f"Hay un conteo físico de Principal en curso (#{row['id']}). Termínalo o anúlalo en el "
+        "portal web antes de importar el inventario de SIESA."
+    )
+
+
 @router.post("/import/inv")
 async def import_inventory(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """Carga el informe de bodega: item, nombre, kilos y lote. El precio llega despues por SOC."""
@@ -138,6 +169,11 @@ async def import_inventory(file: UploadFile = File(...), current_user: dict = De
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="El archivo esta vacio")
+
+    with get_db() as conn:
+        blocked = physical_count_block(conn)
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked)
 
     payload = parse_inv_file(raw)
     with get_db() as conn:

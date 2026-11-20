@@ -8,6 +8,11 @@ import { changeOwnPassword, login, logout, me, publicConfig } from './auth.js'
 import { listAudit } from './audit.js'
 import { createUser, listUsers, resetPassword, unlockUser, updateUser } from './users.js'
 import { createWarehouse, listWarehouses, updateWarehouse } from './warehouses.js'
+import {
+  applyCount, cancelCount, closeCount, confirmZero, confirmZeroAll, createLine, deleteLine, exportCount,
+  getCount, listCounts, listLines, markSiesaAdjusted, openCount, reopenCount, requestRecount, resolveFinding,
+  reviewCount, updateLine,
+} from './counts.js'
 
 const routes = [
   ['GET', /^\/api\/health$/, () => json({ status: 'ok', service: 'tintoreria-web' })],
@@ -25,6 +30,25 @@ const routes = [
   ['POST', /^\/api\/warehouses$/, (req, env) => createWarehouse(req, env)],
   ['PUT', /^\/api\/warehouses\/(\d+)$/, (req, env, m) => updateWarehouse(req, env, m[1])],
   ['GET', /^\/api\/audit$/, (req, env, m, url) => listAudit(req, env, url)],
+  // Conteo físico
+  ['GET', /^\/api\/counts$/, (req, env) => listCounts(req, env)],
+  ['POST', /^\/api\/counts$/, (req, env) => openCount(req, env)],
+  ['GET', /^\/api\/counts\/(\d+)$/, (req, env, m) => getCount(req, env, m[1])],
+  ['GET', /^\/api\/counts\/(\d+)\/lines$/, (req, env, m, url) => listLines(req, env, m[1], url)],
+  ['POST', /^\/api\/counts\/(\d+)\/lines$/, (req, env, m) => createLine(req, env, m[1])],
+  ['PUT', /^\/api\/counts\/(\d+)\/lines\/(\d+)$/, (req, env, m) => updateLine(req, env, m[1], m[2])],
+  ['DELETE', /^\/api\/counts\/(\d+)\/lines\/(\d+)$/, (req, env, m) => deleteLine(req, env, m[1], m[2])],
+  ['GET', /^\/api\/counts\/(\d+)\/review$/, (req, env, m) => reviewCount(req, env, m[1])],
+  ['GET', /^\/api\/counts\/(\d+)\/export\.csv$/, (req, env, m) => exportCount(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/close$/, (req, env, m) => closeCount(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/reopen$/, (req, env, m) => reopenCount(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/cancel$/, (req, env, m) => cancelCount(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/apply$/, (req, env, m) => applyCount(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/siesa$/, (req, env, m) => markSiesaAdjusted(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/confirm-zero$/, (req, env, m) => confirmZeroAll(req, env, m[1])],
+  ['POST', /^\/api\/counts\/(\d+)\/items\/(\d+)\/confirm-zero$/, (req, env, m) => confirmZero(req, env, m[1], m[2])],
+  ['POST', /^\/api\/counts\/(\d+)\/items\/(\d+)\/recount$/, (req, env, m) => requestRecount(req, env, m[1], m[2])],
+  ['POST', /^\/api\/counts\/(\d+)\/findings\/(\d+)$/, (req, env, m) => resolveFinding(req, env, m[1], m[2])],
 ]
 
 async function handleApi(request, env, url) {

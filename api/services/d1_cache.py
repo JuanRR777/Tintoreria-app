@@ -12,7 +12,8 @@ TTL_SEC = 300
 _WRITE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE|ALTER|DROP|CREATE)\b", re.I)
 # Stock, procesos y consecutivos cambian desde varias PCs. No se cachean.
 _VOLATILE = re.compile(
-    r"\b(chemicals|chemical_lots|stock_movements|code_sequences|processes|process_weighings|process_logs)\b",
+    r"\b(chemicals|chemical_lots|stock_movements|code_sequences|processes|process_weighings|process_logs"
+    r"|inventory_counts|warehouses)\b",
     re.I,
 )
 

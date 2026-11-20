@@ -47,6 +47,27 @@ La migración crea **Principal** (`10502`) y **Laboratorio** (`LAB`). Están enl
 
 ---
 
+## Fase 2: conteo físico
+
+Menú **Conteo físico** (roles administrador y almacén).
+
+1. **Abrir** (administrador): elige Principal o Laboratorio. Se guarda una foto del saldo por producto y lote. Solo puede haber un conteo activo por bodega.
+2. **Contar** (almacén, desde el celular): busca por código o nombre, elige el lote (o *S/N*, u *Otro lote…* si no existe) y escribe la cantidad en kg o g. Es **a ciegas**: nunca ve el saldo del sistema. Si un producto está en dos sitios se registra dos veces y se suman. Cada quien puede corregir o borrar solo sus registros.
+3. **Sin señal**: el registro queda guardado en el celular («N sin enviar») y se envía solo al volver la señal. Cada registro lleva un identificador propio, así que reenviarlo no lo duplica.
+4. **Hallazgos**: lo que no está en la lista se registra con el nombre de la etiqueta; el administrador lo asigna a un producto o lo descarta.
+5. **Revisar** (administrador): diferencias por producto y lote valorizadas con el último precio, productos con movimientos durante el conteo, reconteo de un producto (descarta sus registros y lo marca para almacén).
+6. **Cerrar → Aplicar**: para aplicar no puede haber hallazgos pendientes ni productos con existencias sin contar (se cuentan o se **confirman en cero**). Al aplicar, en una sola transacción:
+   - cada lote queda igual a lo contado (0 si no se encontró) y los lotes nuevos se crean,
+   - el total del producto queda igual a la suma de sus lotes,
+   - cada cambio genera un movimiento `adjustment` con referencia `conteo` (o `conteo_lab`) a nombre del usuario administrador de la app de escritorio; la nota dice quién lo aprobó en el portal.
+7. **SIESA**: *Descargar diferencias* genera un CSV (separado por `;`, decimales con coma) por producto y lote. Tras el ajuste manual en SIESA, **Marcar ajustado en SIESA**.
+
+**Protección en la app de escritorio (desde 1.0.8):** no deja importar el informe de inventario de SIESA mientras haya un conteo de Principal abierto, en revisión, o aplicado sin marcar como ajustado en SIESA; si se importara, reemplazaría lo contado.
+
+Recomendación operativa: mientras dure el conteo, no mover mercancía de esa bodega. Lo que se mueva aparece marcado en la revisión, pero al aplicar el saldo queda igual a lo contado.
+
+---
+
 ## Desarrollo local
 
 Usa una base D1 **local** en `web/.wrangler/` (no toca producción).
@@ -69,27 +90,28 @@ npm run test:smoke
 
 La prueba crea usuarios y una bodega de prueba, por eso se niega a correr contra un servidor que no sea local.
 
+Prueba del conteo físico (42 casos) con inventario de ejemplo (`PRB-001` a `PRB-004`):
+
+```powershell
+npx wrangler d1 execute tintoreria --local --file scripts/seed-local-inventory.sql
+node scripts/count-test.mjs
+```
+
 ---
 
 ## Despliegue a Cloudflare
 
 Requiere sesión de wrangler en este PC (`npx wrangler login`, una vez).
 
-### 1. Revisar migraciones pendientes en producción
+### 1. Aplicar migraciones pendientes en producción
 
 ```powershell
 cd web
 npx wrangler d1 migrations list tintoreria --remote
+npm run db:migrate:remote
 ```
 
-- **Si solo aparece `0014_web_auth_warehouses.sql` como pendiente**: `npm run db:migrate:remote`.
-- **Si aparecen también 0008–0013 como pendientes**: **no** uses `migrations apply`. La app de Python ya agregó esas columnas al arrancar y wrangler fallaría por columnas duplicadas. Aplica solo la 0014, que es segura de repetir:
-
-  ```powershell
-  npx wrangler d1 execute tintoreria --remote --file ../worker/migrations/0014_web_auth_warehouses.sql
-  ```
-
-La 0014 solo **agrega** tablas (`web_users`, `web_sessions`, `web_audit`, `warehouses`); no cambia nada que use la app de escritorio.
+El registro de migraciones de producción quedó ordenado el 20-11-2026 (0006–0014 marcadas como aplicadas tras verificar sus columnas), así que `migrations apply` funciona normal. Las migraciones del portal (0014, 0015) solo **agregan** tablas; no cambian nada que use la app de escritorio.
 
 ### 2. Publicar el Worker
 
