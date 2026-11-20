@@ -4,6 +4,10 @@
 name = "tintoreria-web"
 main = "src/index.js"
 compatibility_date = "2026-09-04"
+# Dirección pública: https://tintoreria-web.<subdominio>.workers.dev
+workers_dev = true
+# Sin URLs públicas extra por cada versión subida (usarían la misma base).
+preview_urls = false
 
 [assets]
 directory = "./public"
