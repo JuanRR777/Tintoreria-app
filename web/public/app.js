@@ -481,10 +481,16 @@ function setNav(open) {
   document.getElementById('nav-open').setAttribute('aria-expanded', String(open))
 }
 
+let routeSeq = 0
+
 async function route() {
   if (!state.user || state.user.must_change_password) return
   const main = document.getElementById('main')
   if (!main) return
+  // Si el usuario cambia de sección antes de que termine de cargar la anterior,
+  // la respuesta vieja se descarta y no pinta encima de la nueva.
+  const seq = ++routeSeq
+  const isCurrent = () => seq === routeSeq
   setNav(false)
   const id = currentViewId()
   const view = VIEWS.find((v) => v.id === id)
@@ -498,9 +504,9 @@ async function route() {
   document.title = `${view.label} · Tintorería de Hilos`
   main.innerHTML = '<p class="loading">Cargando…</p>'
   try {
-    await view.render(main)
+    await view.render(main, isCurrent)
   } catch (err) {
-    if (err.handled) return
+    if (err.handled || !isCurrent()) return
     main.innerHTML = `<div class="card empty"><p>${esc(err.message)}</p></div>`
   }
 }
@@ -640,9 +646,10 @@ async function viewHome(main) {
     <div class="grid grid-2 grid-3">${modules.map(card).join('')}</div>`
 }
 
-async function viewWarehouses(main) {
+async function viewWarehouses(main, isCurrent) {
   const manage = can('warehouses.manage')
   const { items } = await api('/api/warehouses')
+  if (!isCurrent()) return
   main.innerHTML = `
     ${pageHead('Bodegas', 'Cada conteo físico se hace por bodega.', manage ? '<button class="btn btn-primary" type="button" id="wh-new">Nueva bodega</button>' : '')}
     <div class="list">
@@ -728,8 +735,9 @@ function roleSelect(selected) {
 
 const ROLE_HELP = 'Administrador: todo. Gerencia: consulta y precios. Compras: compras y precios. Almacén: conteo físico. Consulta: solo ver, sin precios.'
 
-async function viewUsers(main) {
+async function viewUsers(main, isCurrent) {
   const { items } = await api('/api/users')
+  if (!isCurrent()) return
   main.innerHTML = `
     ${pageHead('Usuarios', 'Cuentas del portal web. Son independientes de la app de escritorio.', '<button class="btn btn-primary" type="button" id="user-new">Nuevo usuario</button>')}
     <div class="list">
@@ -869,8 +877,9 @@ const AUDIT_LABELS = {
   warehouse_updated: ['Editó bodega', 'primary'],
 }
 
-async function viewAudit(main) {
+async function viewAudit(main, isCurrent) {
   const { items } = await api('/api/audit?limit=150')
+  if (!isCurrent()) return
   main.innerHTML = `
     ${pageHead('Actividad', 'Últimos 150 eventos de seguridad del portal.', '<button class="btn btn-secondary" type="button" id="audit-refresh">Actualizar</button>')}
     <div class="card">
