@@ -23,9 +23,16 @@ const BALANCE = {
 const STATUS_LABEL = { abierto: 'abierto', revision: 'en revisión', aplicado: 'aplicado', anulado: 'anulado' }
 const EPS = 0.0000005
 
-const UNIT_FACTOR = { kg: 1, g: 0.001, L: 1, mL: 0.001 }
-const UNIT_FAMILY = { kg: 'masa', g: 'masa', L: 'volumen', mL: 'volumen' }
-const FINDING_UNITS = new Set(['kg', 'g', 'L', 'mL', 'und'])
+// Factor a la base de cada familia: masa en kg, volumen en L.
+const UNITS = {
+  kg: ['masa', 1],
+  g: ['masa', 0.001],
+  L: ['volumen', 1],
+  mL: ['volumen', 0.001],
+  gal: ['volumen', 3.785411784],
+}
+const FINDING_UNITS = new Set([...Object.keys(UNITS), 'und'])
+const PACKAGE_RE = /^[\p{L} ]{2,20}$/u
 
 function activeLine(alias = '') {
   const a = alias ? `${alias}.` : ''
@@ -53,12 +60,74 @@ function parseQty(value) {
   return n
 }
 
-function convert(qty, from, to) {
+/**
+ * Convierte entre unidades. Masa ↔ volumen solo con la densidad del producto
+ * (g/mL, que equivale a kg/L); sin densidad no se adivina.
+ */
+function convert(qty, from, to, density = null) {
   if (from === to) return qty
-  if (!UNIT_FAMILY[from] || UNIT_FAMILY[from] !== UNIT_FAMILY[to]) {
-    throw new HttpError(400, `No se puede pasar de ${from} a ${to}`)
+  const source = UNITS[from]
+  const target = UNITS[to]
+  if (!source || !target) throw new HttpError(400, `Unidad no válida: ${from}`)
+  let base = qty * source[1]
+  if (source[0] !== target[0]) {
+    const d = Number(density)
+    if (!(d > 0)) {
+      const allowed = target[0] === 'masa' ? 'kg o g' : 'L, mL o galones'
+      throw new HttpError(400, `Este producto no tiene densidad registrada. Regístralo en ${allowed}, o pide que agreguen la densidad en la app.`)
+    }
+    base = source[0] === 'volumen' ? base * d : base / d
   }
-  return (qty * UNIT_FACTOR[from]) / UNIT_FACTOR[to]
+  return base / target[1]
+}
+
+/** Modo envases: "3 bultos de 25 kg + 12,5 kg sueltos". Devuelve null si es por peso. */
+function readPackage(body) {
+  if (body.package_type === undefined || body.package_type === null || body.package_type === '') return null
+  const type = cleanText(body.package_type, 20, 'El tipo de envase')?.toLowerCase()
+  if (!type || !PACKAGE_RE.test(type)) throw new HttpError(400, 'Tipo de envase no válido (solo letras, 2 a 20)')
+  const count = parseQty(body.package_count)
+  const content = parseQty(body.package_content)
+  if (!(content > 0)) throw new HttpError(400, 'Indica cuánto trae cada envase')
+  const unit = String(body.package_unit || '')
+  if (!UNITS[unit]) throw new HttpError(400, 'Unidad del envase no válida')
+  let looseQty = null
+  let looseUnit = null
+  if (body.loose_qty !== undefined && body.loose_qty !== null && String(body.loose_qty).trim() !== '') {
+    looseQty = parseQty(body.loose_qty)
+    looseUnit = String(body.loose_unit || unit)
+    if (!UNITS[looseUnit]) throw new HttpError(400, 'Unidad del sobrante no válida')
+  }
+  return { type, count, content, unit, looseQty, looseUnit }
+}
+
+function packageTotal(pkg, toUnit, density) {
+  let total = convert(pkg.count * pkg.content, pkg.unit, toUnit, density)
+  if (pkg.looseQty) total += convert(pkg.looseQty, pkg.looseUnit, toUnit, density)
+  return total
+}
+
+function packageFromLine(line) {
+  if (!line.package_type) return null
+  return {
+    type: line.package_type,
+    count: line.package_count,
+    content: line.package_content,
+    unit: line.package_unit,
+    looseQty: line.loose_qty,
+    looseUnit: line.loose_unit,
+  }
+}
+
+function packageColumns(pkg) {
+  return {
+    package_type: pkg ? pkg.type : null,
+    package_count: pkg ? pkg.count : null,
+    package_content: pkg ? pkg.content : null,
+    package_unit: pkg ? pkg.unit : null,
+    loose_qty: pkg ? pkg.looseQty : null,
+    loose_unit: pkg ? pkg.looseUnit : null,
+  }
 }
 
 /** Igual que la app: S/N, SN, SIN LOTE, N/A… quedan como S/N. */
@@ -210,13 +279,14 @@ export async function getCount(request, env, rawId) {
   const admin = can(user.role, 'count.approve')
   if (!admin && count.status !== 'abierto') throw new HttpError(404, 'Conteo no disponible')
 
-  const [items, lots] = await env.DB.batch([
+  const [items, lots, packages] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT i.chemical_id, i.code, i.name, i.unit,
+      `SELECT i.chemical_id, i.code, i.name, i.unit, c.density_g_ml AS density,
               CASE WHEN i.recount_requested_at IS NOT NULL THEN 1 ELSE 0 END AS recount,
               (SELECT COUNT(*) FROM inventory_count_lines l
                 WHERE l.count_id = i.count_id AND l.chemical_id = i.chemical_id AND ${activeLine('l')}) AS lines
        FROM inventory_count_items i
+       JOIN chemicals c ON c.id = i.chemical_id
        WHERE i.count_id = ?
        ORDER BY i.name COLLATE NOCASE`,
     ).bind(count.id),
@@ -226,10 +296,27 @@ export async function getCount(request, env, rawId) {
        JOIN inventory_count_items i ON i.chemical_id = l.chemical_id AND i.count_id = ?
        ORDER BY l.id DESC`,
     ).bind(count.id),
+    // Último envase usado por producto (en cualquier conteo) para proponerlo de una vez.
+    env.DB.prepare(
+      `SELECT chemical_id, package_type, package_content, package_unit FROM inventory_count_lines
+       WHERE package_type IS NOT NULL AND chemical_id IS NOT NULL AND deleted_at IS NULL
+       ORDER BY id DESC LIMIT 2000`,
+    ),
   ])
+  const lastPackage = new Map()
+  for (const p of packages.results || []) {
+    if (!lastPackage.has(p.chemical_id)) {
+      lastPackage.set(p.chemical_id, { type: p.package_type, content: p.package_content, unit: p.package_unit })
+    }
+  }
   return json({
     count: publicCount(count),
-    items: (items.results || []).map((i) => ({ ...i, recount: Number(i.recount) === 1 })),
+    items: (items.results || []).map((i) => ({
+      ...i,
+      density: Number(i.density) > 0 ? Number(i.density) : null,
+      recount: Number(i.recount) === 1,
+      last_package: lastPackage.get(i.chemical_id) || null,
+    })),
     lots: lots.results || [],
   })
 }
@@ -243,6 +330,7 @@ export async function listLines(request, env, rawId, url) {
   const stmt = env.DB.prepare(
     `SELECT l.id, l.chemical_id, l.finding_name, l.finding_status, l.lot_id, l.lot_number,
             l.qty, l.qty_entered, l.unit_entered, l.location, l.notes, l.client_uuid,
+            l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit,
             l.counted_by, l.counted_at, l.updated_at,
             i.code, i.name, i.unit, u.full_name AS counted_by_name
      FROM inventory_count_lines l
@@ -259,24 +347,27 @@ export async function listLines(request, env, rawId, url) {
 }
 
 async function resolveLineInput(env, count, body) {
-  const unitEntered = String(body.unit_entered || '').trim()
-  const qtyEntered = parseQty(body.qty_entered)
+  const pkg = readPackage(body)
+  const unitEntered = pkg ? pkg.type : String(body.unit_entered || '').trim()
+  const qtyEntered = pkg ? pkg.count : parseQty(body.qty_entered)
   const location = cleanText(body.location, 40, 'La ubicación')
   const notes = cleanText(body.notes, 200, 'La nota')
 
   if (body.chemical_id === undefined || body.chemical_id === null || body.chemical_id === '') {
     const name = cleanText(body.finding_name, 80, 'El nombre')
     if (!name || name.length < 3) throw new HttpError(400, 'Escribe el nombre del producto encontrado (mínimo 3 letras)')
-    if (!FINDING_UNITS.has(unitEntered)) throw new HttpError(400, 'Unidad no válida')
+    if (!pkg && !FINDING_UNITS.has(unitEntered)) throw new HttpError(400, 'Unidad no válida')
     return {
       chemical_id: null,
       finding_name: name.toUpperCase(),
       finding_status: 'pendiente',
       lot_id: null,
       lot_number: normalizeLot(body.lot_number),
-      qty: round6(qtyEntered),
+      // Hallazgo por envases: total en la unidad del envase hasta que se asigne a un producto.
+      qty: round6(pkg ? packageTotal(pkg, pkg.unit, null) : qtyEntered),
       qty_entered: qtyEntered,
       unit_entered: unitEntered,
+      ...packageColumns(pkg),
       location,
       notes,
     }
@@ -284,10 +375,12 @@ async function resolveLineInput(env, count, body) {
 
   const chemicalId = parseId(body.chemical_id, 'Producto')
   const item = await env.DB.prepare(
-    'SELECT chemical_id, unit FROM inventory_count_items WHERE count_id = ? AND chemical_id = ?',
+    `SELECT i.chemical_id, i.unit, c.density_g_ml AS density
+     FROM inventory_count_items i JOIN chemicals c ON c.id = i.chemical_id
+     WHERE i.count_id = ? AND i.chemical_id = ?`,
   ).bind(count.id, chemicalId).first()
   if (!item) throw new HttpError(400, 'Ese producto no está en este conteo')
-  if (!UNIT_FACTOR[unitEntered]) throw new HttpError(400, 'Unidad no válida')
+  if (!pkg && !UNITS[unitEntered]) throw new HttpError(400, 'Unidad no válida')
 
   let lotId = null
   let lotNumber
@@ -311,9 +404,10 @@ async function resolveLineInput(env, count, body) {
     finding_status: null,
     lot_id: lotId,
     lot_number: lotNumber,
-    qty: round6(convert(qtyEntered, unitEntered, item.unit)),
+    qty: round6(pkg ? packageTotal(pkg, item.unit, item.density) : convert(qtyEntered, unitEntered, item.unit, item.density)),
     qty_entered: qtyEntered,
     unit_entered: unitEntered,
+    ...packageColumns(pkg),
     location,
     notes,
   }
@@ -338,13 +432,16 @@ export async function createLine(request, env, rawId) {
     env.DB.prepare(
       `INSERT INTO inventory_count_lines
          (count_id, chemical_id, finding_name, finding_status, lot_id, lot_number, qty, qty_entered,
-          unit_entered, location, notes, client_uuid, counted_by)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          unit_entered, package_type, package_count, package_content, package_unit, loose_qty, loose_unit,
+          location, notes, client_uuid, counted_by)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM inventory_counts WHERE id = ? AND status = 'abierto')
        ON CONFLICT (count_id, client_uuid) DO NOTHING`,
     ).bind(
       count.id, line.chemical_id, line.finding_name, line.finding_status, line.lot_id, line.lot_number,
-      line.qty, line.qty_entered, line.unit_entered, line.location, line.notes, uuid, user.id, count.id,
+      line.qty, line.qty_entered, line.unit_entered, line.package_type, line.package_count,
+      line.package_content, line.package_unit, line.loose_qty, line.loose_unit,
+      line.location, line.notes, uuid, user.id, count.id,
     ),
   ]
   if (line.chemical_id) {
@@ -376,6 +473,12 @@ export async function updateLine(request, env, rawId, rawLineId) {
   assertStatus(count, ['abierto'], 'editar registros')
   const current = await editableLine(env, count, user, rawLineId)
   const body = await readJson(request)
+  // Si llegan datos de envase se usan; si llega cantidad simple pasa a peso;
+  // si no llega ninguno se conserva lo que tenía el registro.
+  const hasPackage = Object.prototype.hasOwnProperty.call(body, 'package_type')
+  const hasSimple = body.qty_entered !== undefined || body.unit_entered !== undefined
+  const keepPackage = !hasPackage && !hasSimple && current.package_type
+  const packageSource = hasPackage ? body : keepPackage ? current : {}
   const merged = {
     chemical_id: current.chemical_id,
     finding_name: current.finding_name,
@@ -383,16 +486,27 @@ export async function updateLine(request, env, rawId, rawLineId) {
     lot_number: body.lot_number !== undefined ? body.lot_number : current.lot_number,
     qty_entered: body.qty_entered !== undefined ? body.qty_entered : current.qty_entered,
     unit_entered: body.unit_entered !== undefined ? body.unit_entered : current.unit_entered,
+    package_type: packageSource.package_type,
+    package_count: packageSource.package_count,
+    package_content: packageSource.package_content,
+    package_unit: packageSource.package_unit,
+    loose_qty: packageSource.loose_qty,
+    loose_unit: packageSource.loose_unit,
     location: body.location !== undefined ? body.location : current.location,
     notes: body.notes !== undefined ? body.notes : current.notes,
   }
   const line = await resolveLineInput(env, count, merged)
   await env.DB.prepare(
     `UPDATE inventory_count_lines
-     SET lot_id = ?, lot_number = ?, qty = ?, qty_entered = ?, unit_entered = ?, location = ?, notes = ?,
-         updated_at = datetime('now')
+     SET lot_id = ?, lot_number = ?, qty = ?, qty_entered = ?, unit_entered = ?,
+         package_type = ?, package_count = ?, package_content = ?, package_unit = ?, loose_qty = ?, loose_unit = ?,
+         location = ?, notes = ?, updated_at = datetime('now')
      WHERE id = ?`,
-  ).bind(line.lot_id, line.lot_number, line.qty, line.qty_entered, line.unit_entered, line.location, line.notes, current.id).run()
+  ).bind(
+    line.lot_id, line.lot_number, line.qty, line.qty_entered, line.unit_entered,
+    line.package_type, line.package_count, line.package_content, line.package_unit, line.loose_qty, line.loose_unit,
+    line.location, line.notes, current.id,
+  ).run()
   const saved = await env.DB.prepare(`${LINE_SELECT} WHERE l.id = ?`).bind(current.id).first()
   return json({ line: saved })
 }
@@ -474,7 +588,8 @@ async function buildReview(env, count) {
     ).bind(count.id),
     env.DB.prepare(
       `SELECT l.id, l.chemical_id, l.finding_name, l.finding_status, l.lot_id, l.lot_number, l.qty,
-              l.qty_entered, l.unit_entered, l.location, l.notes, l.counted_at, u.full_name AS counted_by_name
+              l.qty_entered, l.unit_entered, l.location, l.notes, l.counted_at, u.full_name AS counted_by_name,
+              l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit
        FROM inventory_count_lines l LEFT JOIN web_users u ON u.id = l.counted_by
        WHERE l.count_id = ? AND l.deleted_at IS NULL AND l.superseded_at IS NULL
        ORDER BY l.id`,
@@ -644,13 +759,16 @@ export async function resolveFinding(request, env, rawId, rawLineId) {
 
   const chemicalId = parseId(body.chemical_id, 'Producto')
   const chem = await env.DB.prepare(
-    "SELECT id, code, name, unit FROM chemicals WHERE id = ? AND deleted_at IS NULL AND code NOT LIKE 'TMP%'",
+    "SELECT id, code, name, unit, density_g_ml FROM chemicals WHERE id = ? AND deleted_at IS NULL AND code NOT LIKE 'TMP%'",
   ).bind(chemicalId).first()
   if (!chem) throw new HttpError(404, 'Producto no encontrado')
-  if (!UNIT_FACTOR[line.unit_entered]) {
+  const pkg = packageFromLine(line)
+  if (!pkg && !UNITS[line.unit_entered]) {
     throw new HttpError(400, `El hallazgo está en "${line.unit_entered}". Pide registrarlo de nuevo en ${chem.unit}.`)
   }
-  const qty = round6(convert(line.qty_entered, line.unit_entered, chem.unit))
+  const qty = round6(pkg
+    ? packageTotal(pkg, chem.unit, chem.density_g_ml)
+    : convert(line.qty_entered, line.unit_entered, chem.unit, chem.density_g_ml))
   const lotNumber = normalizeLot(line.lot_number)
   const lot = await env.DB.prepare(
     'SELECT id FROM chemical_lots WHERE chemical_id = ? AND UPPER(lot_number) = ? ORDER BY id LIMIT 1',

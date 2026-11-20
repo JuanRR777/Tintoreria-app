@@ -173,11 +173,51 @@ check('laboratorio de PRB-001 queda en 0,5 kg', near(r.data.items.find((i) => i.
 r = await admin.req('GET', `/api/counts/${countId}/review`)
 check('Principal de PRB-001 sigue en 10 kg', near(r.data.items.find((i) => i.code === 'PRB-001')?.current_qty, 10))
 
-// --- Reconteo y anulación ---
+// --- Envases, galones y densidad (en un conteo que luego se anula) ---
 r = await admin.req('POST', '/api/counts', { warehouse_id: principal.id })
 const thirdId = r.data.count?.id
 const chemA = byCode('PRB-001').chemical_id
-await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemA, lot_number: '2609C1001', qty_entered: '99', unit_entered: 'kg' })
+const chemB = byCode('PRB-002').chemical_id
+const chemC = byCode('PRB-003').chemical_id
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemB, lot_number: 'S/N', package_type: 'bulto', package_count: '3', package_content: '25', package_unit: 'kg', loose_qty: '12,5', loose_unit: 'kg' })
+check('3 bultos × 25 kg + 12,5 kg suelto = 87,5 kg', r.status === 201 && near(r.data.line?.qty, 87.5) && r.data.line?.package_type === 'bulto', JSON.stringify(r.data))
+const bultoLine = r.data.line
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemB, package_type: 'caneca', package_count: '2', package_content: '20', package_unit: 'L' })
+check('litros sin densidad → 400 con explicación', r.status === 400 && /densidad/.test(r.data.error || ''))
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemA, lot_number: '2609C1001', package_type: 'caneca', package_count: '2', package_content: '20', package_unit: 'L' })
+check('2 canecas × 20 L con densidad 1,05 = 42 kg', r.status === 201 && near(r.data.line?.qty, 42), JSON.stringify(r.data))
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemA, lot_number: '2609C1001', qty_entered: '1', unit_entered: 'gal' })
+check('1 galón con densidad 1,05 = 3,974682 kg', r.status === 201 && near(r.data.line?.qty, 3.974682), JSON.stringify(r.data))
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemC, package_type: 'tarro', package_count: '4', package_content: '500', package_unit: 'g' })
+check('envase propio "tarro": 4 × 500 g = 2 kg', r.status === 201 && near(r.data.line?.qty, 2))
+
+r = await ana.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), chemical_id: chemC, package_type: 'x1', package_count: '1', package_content: '1', package_unit: 'kg' })
+check('tipo de envase inválido → 400', r.status === 400)
+
+r = await ana.req('PUT', `/api/counts/${thirdId}/lines/${bultoLine.id}`, { package_type: 'bulto', package_count: '4', package_content: '25', package_unit: 'kg', loose_qty: '12,5', loose_unit: 'kg' })
+check('editar a 4 bultos recalcula 112,5 kg', r.status === 200 && near(r.data.line?.qty, 112.5))
+r = await ana.req('PUT', `/api/counts/${thirdId}/lines/${bultoLine.id}`, { lot_number: 'S/N', location: 'Patio' })
+check('editar solo la ubicación conserva los envases', r.status === 200 && near(r.data.line?.qty, 112.5) && r.data.line?.package_type === 'bulto')
+r = await ana.req('PUT', `/api/counts/${thirdId}/lines/${bultoLine.id}`, { qty_entered: '10', unit_entered: 'kg' })
+check('pasar a peso borra los datos de envase', r.status === 200 && near(r.data.line?.qty, 10) && r.data.line?.package_type === null)
+
+r = await ana.req('GET', `/api/counts/${thirdId}`)
+const lastA = r.data.items.find((i) => i.chemical_id === chemA)
+check('el portal recuerda el último envase del producto', lastA?.last_package?.type === 'caneca' && near(lastA?.last_package?.content, 20))
+check('el catálogo envía la densidad del producto', near(lastA?.density, 1.05))
+
+r = await beto.req('POST', `/api/counts/${thirdId}/lines`, { client_uuid: uuid(), finding_name: 'suavizante sin etiqueta', package_type: 'caneca', package_count: '2', package_content: '20', package_unit: 'kg' })
+check('hallazgo por envases: 2 canecas × 20 kg', r.status === 201 && near(r.data.line?.qty, 40))
+r = await admin.req('POST', `/api/counts/${thirdId}/findings/${r.data.line.id}`, { action: 'assign', chemical_id: byCode('PRB-004').chemical_id })
+r = await admin.req('GET', `/api/counts/${thirdId}/review`)
+check('al asignarlo a PRB-004 cuenta 40 kg', near(r.data.items.find((i) => i.code === 'PRB-004')?.counted_qty, 40))
+
+// --- Reconteo y anulación ---
 r = await admin.req('POST', `/api/counts/${thirdId}/items/${chemA}/recount`, {})
 check('admin pide reconteo', r.status === 200)
 r = await ana.req('GET', `/api/counts/${thirdId}`)

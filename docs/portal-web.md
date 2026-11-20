@@ -53,6 +53,8 @@ Menú **Conteo físico** (roles administrador y almacén).
 
 1. **Abrir** (administrador): elige Principal o Laboratorio. Se guarda una foto del saldo por producto y lote. Solo puede haber un conteo activo por bodega.
 2. **Contar** (almacén, desde el celular): busca por código o nombre, elige el lote (o *S/N*, u *Otro lote…* si no existe) y escribe la cantidad en kg o g. Es **a ciegas**: nunca ve el saldo del sistema. Si un producto está en dos sitios se registra dos veces y se suman. Cada quien puede corregir o borrar solo sus registros.
+   - **Por envases**: bulto, saco, caneca, garrafa, tambor, cuñete, caja, bolsa u otro. Se indica cuántos, cuánto trae cada uno y, opcionalmente, un sobrante suelto (ej. 3 bultos × 25 kg + 12,5 kg = 87,5 kg). El portal recuerda el último envase usado de cada producto y lo propone.
+   - **Litros o galones** de un producto que se guarda en kg (o al revés) se convierten con la **densidad** registrada en la app de escritorio (ficha del químico). Sin densidad, el portal solo ofrece unidades de la misma clase.
 3. **Sin señal**: el registro queda guardado en el celular («N sin enviar») y se envía solo al volver la señal. Cada registro lleva un identificador propio, así que reenviarlo no lo duplica.
 4. **Hallazgos**: lo que no está en la lista se registra con el nombre de la etiqueta; el administrador lo asigna a un producto o lo descarta.
 5. **Revisar** (administrador): diferencias por producto y lote valorizadas con el último precio, productos con movimientos durante el conteo, reconteo de un producto (descarta sus registros y lo marca para almacén).

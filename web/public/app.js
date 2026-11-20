@@ -960,7 +960,188 @@ const COUNT_STATUS = {
   aplicado: ['Aplicado', 'primary'],
   anulado: ['Anulado', ''],
 }
-const UNIT_CHOICES = { kg: ['kg', 'g'], g: ['g', 'kg'], L: ['L', 'mL'], mL: ['mL', 'L'] }
+// Igual que en el servidor: masa en kg, volumen en L. Masa ↔ volumen solo con densidad.
+const UNIT_INFO = {
+  kg: ['masa', 1, 'kg'],
+  g: ['masa', 0.001, 'g'],
+  L: ['volumen', 1, 'L'],
+  mL: ['volumen', 0.001, 'mL'],
+  gal: ['volumen', 3.785411784, 'galón'],
+}
+const PACKAGE_TYPES = ['bulto', 'saco', 'caneca', 'garrafa', 'tambor', 'cuñete', 'caja', 'bolsa']
+
+function unitLabel(unit) {
+  return UNIT_INFO[unit]?.[2] || unit || ''
+}
+
+function plural(word, n) {
+  if (Number(n) === 1) return word
+  if (word === 'galón') return 'galones'
+  return /[aeiouáéíóú]$/i.test(word) ? `${word}s` : `${word}es`
+}
+
+function convertUnits(qty, from, to, density) {
+  if (from === to) return qty
+  const source = UNIT_INFO[from]
+  const target = UNIT_INFO[to]
+  if (!source || !target) return null
+  let base = qty * source[1]
+  if (source[0] !== target[0]) {
+    if (!(Number(density) > 0)) return null
+    base = source[0] === 'volumen' ? base * density : base / density
+  }
+  return base / target[1]
+}
+
+/** Unidades que tiene sentido ofrecer para un producto (con densidad se abre peso ↔ volumen). */
+function unitsFor(item) {
+  if (!item) return ['kg', 'g', 'L', 'mL', 'gal']
+  const mass = (UNIT_INFO[item.unit]?.[0] || 'masa') === 'masa'
+  const same = mass ? ['kg', 'g'] : ['L', 'mL', 'gal']
+  const other = item.density ? (mass ? ['L', 'gal'] : ['kg', 'g']) : []
+  return [...new Set([item.unit, ...same, ...other])].filter((u) => UNIT_INFO[u])
+}
+
+function lineQtyText(line, itemUnit) {
+  if (!line.package_type) return fmtQty(line.qty_entered, unitLabel(line.unit_entered))
+  let text = `${fmtQty(line.package_count)} ${plural(line.package_type, line.package_count)} × ${fmtQty(line.package_content, unitLabel(line.package_unit))}`
+  if (Number(line.loose_qty) > 0) text += ` + ${fmtQty(line.loose_qty, unitLabel(line.loose_unit))} suelto`
+  if (itemUnit && line.qty !== null && line.qty !== undefined) text += ` = ${fmtQty(line.qty, unitLabel(itemUnit))}`
+  return text
+}
+
+function numText(value) {
+  return value === null || value === undefined || value === '' ? '' : String(value).replace('.', ',')
+}
+
+/** Campos de cantidad: por peso/volumen o por envases (bultos, canecas…). */
+function qtyFieldsHtml({ units, simpleUnits, line, suggestion }) {
+  const pkg = line && line.package_type
+    ? { type: line.package_type, count: line.package_count, content: line.package_content, unit: line.package_unit, loose: line.loose_qty, looseUnit: line.loose_unit }
+    : null
+  const mode = line ? (pkg ? 'envases' : 'peso') : (suggestion ? 'envases' : 'peso')
+  const base = pkg || (suggestion ? { type: suggestion.type, content: suggestion.content, unit: suggestion.unit } : {})
+  const typeKnown = !base.type || PACKAGE_TYPES.includes(base.type)
+  const unitSelect = (name, selected) => `<select class="select unit-select" name="${name}">
+    ${units.map((u) => `<option value="${u}" ${u === selected ? 'selected' : ''}>${esc(unitLabel(u))}</option>`).join('')}</select>`
+  const simple = simpleUnits || units
+  return `
+    <div class="field">
+      <span class="field-label">¿Cómo lo vas a contar?</span>
+      <div class="segmented mode-switch">
+        <label class="seg"><input type="radio" name="mode" value="peso" ${mode === 'peso' ? 'checked' : ''}><span>Peso o volumen</span></label>
+        <label class="seg"><input type="radio" name="mode" value="envases" ${mode === 'envases' ? 'checked' : ''}><span>Envases</span></label>
+      </div>
+    </div>
+    <div data-pane="peso" ${mode === 'peso' ? '' : 'hidden'}>
+      <div class="field">
+        <label for="qty">Cantidad encontrada</label>
+        <div class="qty-row">
+          <input class="input input-qty" id="qty" name="qty" inputmode="decimal" autocomplete="off" value="${line && !pkg ? esc(numText(line.qty_entered)) : ''}" placeholder="0">
+          <div class="segmented">${simple.map((u, idx) => `
+            <label class="seg"><input type="radio" name="unit_entered" value="${u}" ${(line && !pkg ? line.unit_entered === u : idx === 0) ? 'checked' : ''}><span>${esc(unitLabel(u))}</span></label>`).join('')}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div data-pane="envases" ${mode === 'envases' ? '' : 'hidden'}>
+      <div class="field">
+        <label for="package_type">Tipo de envase</label>
+        <select class="select" id="package_type" name="package_type">
+          ${PACKAGE_TYPES.map((t) => `<option value="${t}" ${base.type === t ? 'selected' : ''}>${esc(t[0].toUpperCase() + t.slice(1))}</option>`).join('')}
+          <option value="__otro" ${typeKnown ? '' : 'selected'}>Otro…</option>
+        </select>
+        <input class="input lot-other" name="package_other" maxlength="20" placeholder="Ej: tarro, frasco, galonera" value="${typeKnown ? '' : esc(base.type)}" ${typeKnown ? 'hidden' : ''}>
+      </div>
+      <div class="pkg-grid">
+        <div class="field">
+          <label for="package_count">¿Cuántos?</label>
+          <input class="input input-qty" id="package_count" name="package_count" inputmode="decimal" autocomplete="off" value="${esc(numText(pkg?.count))}" placeholder="0">
+        </div>
+        <div class="field">
+          <label for="package_content">Cada uno trae</label>
+          <div class="qty-row">
+            <input class="input" id="package_content" name="package_content" inputmode="decimal" autocomplete="off" value="${esc(numText(base.content))}" placeholder="Ej: 25">
+            ${unitSelect('package_unit', base.unit || units[0])}
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="loose_qty">Suelto o envase abierto (opcional)</label>
+        <div class="qty-row">
+          <input class="input" id="loose_qty" name="loose_qty" inputmode="decimal" autocomplete="off" value="${esc(numText(pkg?.loose))}" placeholder="0">
+          ${unitSelect('loose_unit', pkg?.looseUnit || base.unit || units[0])}
+        </div>
+      </div>
+      ${suggestion && !line ? '<p class="hint">Envase y contenido tomados del último conteo de este producto. Cámbialos si no coinciden.</p>' : ''}
+      <p class="pkg-total" data-total aria-live="polite"></p>
+    </div>`
+}
+
+function bindQtyFields(form, item) {
+  const total = form.querySelector('[data-total]')
+  const mode = () => form.querySelector('input[name="mode"]:checked')?.value || 'peso'
+  const parse = (v) => Number(String(v || '').trim().replace(',', '.'))
+  const paintTotal = () => {
+    const count = parse(form.package_count.value)
+    const content = parse(form.package_content.value)
+    const looseText = form.loose_qty.value.trim()
+    if (!form.package_count.value.trim() || !(count >= 0) || !(content > 0)) { total.textContent = ''; return }
+    const target = item ? item.unit : form.package_unit.value
+    const packed = convertUnits(count * content, form.package_unit.value, target, item?.density)
+    const loose = looseText ? convertUnits(parse(looseText), form.loose_unit.value, target, item?.density) : 0
+    const bad = packed === null || loose === null || Number.isNaN(loose)
+    total.classList.toggle('is-error', bad)
+    total.textContent = bad
+      ? 'Este producto no tiene densidad registrada: usa unidades de peso si se guarda en kg (o de volumen si se guarda en L).'
+      : `Total: ${fmtQty(packed + loose, unitLabel(target))}`
+  }
+  const sync = () => {
+    form.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = pane.dataset.pane !== mode() })
+    paintTotal()
+  }
+  form.querySelectorAll('input[name="mode"]').forEach((radio) => radio.addEventListener('change', () => {
+    sync()
+    ;(mode() === 'envases' ? form.package_count : form.qty).focus()
+  }))
+  form.package_type.addEventListener('change', () => {
+    form.package_other.hidden = form.package_type.value !== '__otro'
+    if (!form.package_other.hidden) form.package_other.focus()
+  })
+  for (const name of ['package_count', 'package_content', 'loose_qty', 'package_unit', 'loose_unit']) {
+    form[name].addEventListener('input', paintTotal)
+    form[name].addEventListener('change', paintTotal)
+  }
+  sync()
+  return mode
+}
+
+function readQtyFields(form) {
+  const mode = form.querySelector('input[name="mode"]:checked')?.value || 'peso'
+  const num = (value, label, required = true) => {
+    const text = String(value || '').trim().replace(',', '.')
+    if (!text && !required) return ''
+    if (!/^\d+(\.\d+)?$/.test(text)) throw new Error(`${label}: escribe un número (ej: 12,5)`)
+    return text
+  }
+  if (mode === 'envases') {
+    const type = form.package_type.value === '__otro' ? form.package_other.value.trim().toLowerCase() : form.package_type.value
+    if (!/^[\p{L} ]{2,20}$/u.test(type)) throw new Error('Escribe el tipo de envase (solo letras)')
+    const count = num(form.package_count.value, '¿Cuántos?')
+    const content = num(form.package_content.value, 'Cada uno trae')
+    if (!(Number(content) > 0)) throw new Error('Indica cuánto trae cada envase')
+    const loose = num(form.loose_qty.value, 'Suelto', false)
+    return {
+      package_type: type,
+      package_count: count,
+      package_content: content,
+      package_unit: form.package_unit.value,
+      loose_qty: loose || null,
+      loose_unit: loose ? form.loose_unit.value : null,
+    }
+  }
+  return { qty_entered: num(form.qty.value, 'Cantidad'), unit_entered: form.querySelector('input[name="unit_entered"]:checked')?.value }
+}
 const QUEUE_KEY = 'tin-count-queue-v1'
 const FAILED_KEY = 'tin-count-failed-v1'
 let flushing = false
@@ -1244,7 +1425,7 @@ async function viewCountEntry(main, isCurrent, countId) {
       <div class="line-item">
         <div class="line-text">
           <strong>${esc(l.name || l.finding_name || '')}${l.finding_name && !l.name ? ' <span class="badge badge-info">Hallazgo</span>' : ''}</strong>
-          <span>${esc(fmtQty(l.qty_entered, l.unit_entered))} · lote ${esc(l.lot_number || 'S/N')}${l.location ? ` · ${esc(l.location)}` : ''}</span>
+          <span>${esc(lineQtyText(l, l.pending ? null : l.unit))} · lote ${esc(l.lot_number || 'S/N')}${l.location ? ` · ${esc(l.location)}` : ''}</span>
           <span>${l.pending ? '<span class="badge badge-warning">Sin enviar</span>' : esc(fmtDate(l.counted_at))}</span>
         </div>
         ${l.pending ? '' : `<button class="btn btn-ghost btn-sm" type="button" data-edit-line="${l.id}">Editar</button>`}
@@ -1268,12 +1449,6 @@ async function viewCountEntry(main, isCurrent, countId) {
     paintFailed()
   }
 
-  function unitOptions(unit, selected) {
-    const choices = UNIT_CHOICES[unit] || [unit]
-    return choices.map((u, idx) => `
-      <label class="seg"><input type="radio" name="unit_entered" value="${u}" ${(selected ? selected === u : idx === 0) ? 'checked' : ''}><span>${esc(u)}</span></label>`).join('')
-  }
-
   function lotOptions(itemLots, current) {
     const numbers = [...new Set(itemLots.map((l) => l.lot_number))]
     if (!numbers.includes('S/N')) numbers.push('S/N')
@@ -1286,19 +1461,13 @@ async function viewCountEntry(main, isCurrent, countId) {
     const itemLots = lotsByItem.get(item.chemical_id) || []
     const otherLot = line && !itemLots.some((l) => l.lot_number === line.lot_number) && line.lot_number !== 'S/N' ? line.lot_number : ''
     return `
-      <p class="dialog-sub"><code>${esc(item.code)}</code> · se guarda en ${esc(item.unit)}</p>
+      <p class="dialog-sub"><code>${esc(item.code)}</code> · se guarda en ${esc(unitLabel(item.unit))}${item.density ? ` · densidad ${esc(fmtQty(item.density))} g/mL` : ''}</p>
       <div class="field">
         <label for="lot">Lote</label>
         <select class="select" id="lot" name="lot">${lotOptions(itemLots, line?.lot_number)}</select>
         <input class="input lot-other" id="lot_other" name="lot_other" maxlength="40" placeholder="Escribe el lote tal como aparece" value="${esc(otherLot)}" ${otherLot ? '' : 'hidden'} autocapitalize="characters">
       </div>
-      <div class="field">
-        <label for="qty">Cantidad encontrada</label>
-        <div class="qty-row">
-          <input class="input input-qty" id="qty" name="qty" inputmode="decimal" autocomplete="off" required value="${line ? esc(String(line.qty_entered).replace('.', ',')) : ''}" placeholder="0">
-          <div class="segmented">${unitOptions(item.unit, line?.unit_entered)}</div>
-        </div>
-      </div>
+      ${qtyFieldsHtml({ units: unitsFor(item), line, suggestion: line ? null : item.last_package })}
       <div class="field"><label for="location">Ubicación (opcional)</label><input class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}" placeholder="Ej: Estante 3"></div>
       <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" value="${esc(line?.notes || '')}"></div>`
   }
@@ -1313,12 +1482,9 @@ async function viewCountEntry(main, isCurrent, countId) {
   }
 
   function readLineForm(form) {
-    const qtyText = form.qty.value.trim().replace(',', '.')
-    if (!/^\d+(\.\d+)?$/.test(qtyText)) throw new Error('Escribe la cantidad con números (ej: 12,5)')
     const lot = form.lot.value === '__otro' ? form.lot_other.value.trim() : form.lot.value
     if (form.lot.value === '__otro' && !lot) throw new Error('Escribe el lote o elige S/N')
-    const unit = form.querySelector('input[name="unit_entered"]:checked')?.value
-    return { qty_entered: qtyText, unit_entered: unit, lot_number: lot, location: form.location.value.trim(), notes: form.notes.value.trim() }
+    return { ...readQtyFields(form), lot_number: lot, location: form.location.value.trim(), notes: form.notes.value.trim() }
   }
 
   function openItemEntry(item) {
@@ -1329,8 +1495,12 @@ async function viewCountEntry(main, isCurrent, countId) {
       body: `
         ${item.recount ? '<p class="notice notice-warning">Reconteo pedido: cuenta de nuevo todo este producto.</p>' : ''}
         ${lineFields({ item })}
-        ${existing.length ? `<div class="already"><strong>Ya registrado en este conteo:</strong>${existing.map((l) => `<div>${esc(fmtQty(l.qty_entered, l.unit_entered))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || 'tú')}${l.pending ? ' (sin enviar)' : ''}</div>`).join('')}</div>` : ''}`,
-      onOpen: (form) => { bindLotSelect(form); form.qty.focus() },
+        ${existing.length ? `<div class="already"><strong>Ya registrado en este conteo:</strong>${existing.map((l) => `<div>${esc(lineQtyText(l, l.pending ? null : item.unit))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || 'tú')}${l.pending ? ' (sin enviar)' : ''}</div>`).join('')}</div>` : ''}`,
+      onOpen: (form) => {
+        bindLotSelect(form)
+        const mode = bindQtyFields(form, item)
+        ;(mode() === 'envases' ? form.package_count : form.qty).focus()
+      },
       onSubmit: async (form) => {
         const data = readLineForm(form)
         storeSet('tin-count-location', data.location)
@@ -1354,7 +1524,7 @@ async function viewCountEntry(main, isCurrent, countId) {
       count_id: countId,
       user_id: state.user.id,
       body,
-      label: `${preview.name || preview.finding_name} ${preview.qty_entered} ${preview.unit_entered}`,
+      label: `${preview.name || preview.finding_name} ${lineQtyText(preview)}`,
       preview: { ...preview, counted_at: null },
       created_at: Date.now(),
     })
@@ -1363,13 +1533,17 @@ async function viewCountEntry(main, isCurrent, countId) {
 
   function openLineEditor(line) {
     if (!line) return
-    const item = itemById.get(line.chemical_id) || { chemical_id: line.chemical_id, code: line.code || '—', name: line.name || line.finding_name, unit: line.unit || line.unit_entered }
+    const item = itemById.get(line.chemical_id)
+    if (!item) {
+      openFindingDialog(line)
+      return
+    }
     const dialog = openDialog({
       title: `Editar · ${item.name}`,
       submitLabel: 'Guardar cambios',
       body: `${lineFields({ item, line })}
         <button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>`,
-      onOpen: (form) => bindLotSelect(form),
+      onOpen: (form) => { bindLotSelect(form); bindQtyFields(form, item) },
       onSubmit: async (form) => {
         const data = readLineForm(form)
         await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'PUT', body: data })
@@ -1400,37 +1574,48 @@ async function viewCountEntry(main, isCurrent, countId) {
     const btn = event.target.closest('[data-item]')
     if (btn) openItemEntry(itemById.get(Number(btn.dataset.item)))
   })
-  document.getElementById('finding-new').addEventListener('click', () => {
-    openDialog({
-      title: 'Registrar hallazgo',
-      submitLabel: 'Guardar hallazgo',
+  function openFindingDialog(line = null) {
+    const dialog = openDialog({
+      title: line ? `Editar hallazgo · ${line.finding_name}` : 'Registrar hallazgo',
+      submitLabel: line ? 'Guardar cambios' : 'Guardar hallazgo',
       body: `
-        <p class="notice">Para productos que encontraste y no aparecen en la lista. El administrador los asignará al producto correcto.</p>
-        <div class="field"><label for="finding_name">Nombre en la etiqueta</label><input class="input" id="finding_name" name="finding_name" required maxlength="80" autocapitalize="characters"></div>
-        <div class="field"><label for="lot_free">Lote (opcional)</label><input class="input" id="lot_free" name="lot_free" maxlength="40" placeholder="S/N si no tiene" autocapitalize="characters"></div>
-        <div class="field">
-          <label for="qty">Cantidad encontrada</label>
-          <div class="qty-row">
-            <input class="input input-qty" id="qty" name="qty" inputmode="decimal" autocomplete="off" required placeholder="0">
-            <select class="select unit-select" name="unit">${['kg', 'g', 'L', 'mL', 'und'].map((u) => `<option value="${u}">${u}</option>`).join('')}</select>
-          </div>
-        </div>
-        <div class="field"><label for="location">Ubicación (opcional)</label><input class="input" id="location" name="location" maxlength="40" value="${esc(storeGet('tin-count-location', ''))}"></div>
-        <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: envase sin etiqueta completa"></div>`,
-      onOpen: (form) => form.finding_name.focus(),
+        ${line ? '' : '<p class="notice">Para productos que encontraste y no aparecen en la lista. El administrador los asignará al producto correcto.</p>'}
+        <div class="field"><label for="finding_name">Nombre en la etiqueta</label><input class="input" id="finding_name" name="finding_name" maxlength="80" autocapitalize="characters" value="${esc(line?.finding_name || '')}" ${line ? 'readonly' : ''}></div>
+        <div class="field"><label for="lot_free">Lote (opcional)</label><input class="input" id="lot_free" name="lot_free" maxlength="40" placeholder="S/N si no tiene" autocapitalize="characters" value="${esc(line && line.lot_number !== 'S/N' ? line.lot_number : '')}"></div>
+        ${qtyFieldsHtml({ units: unitsFor(null), simpleUnits: ['kg', 'g', 'L', 'mL', 'gal', 'und'], line })}
+        <div class="field"><label for="location">Ubicación (opcional)</label><input class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}"></div>
+        <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: envase sin etiqueta completa" value="${esc(line?.notes || '')}"></div>
+        ${line ? '<button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>' : ''}`,
+      onOpen: (form) => {
+        bindQtyFields(form, null)
+        if (!line) form.finding_name.focus()
+      },
       onSubmit: async (form) => {
         const name = form.finding_name.value.trim()
         if (name.length < 3) throw new Error('Escribe el nombre (mínimo 3 letras)')
-        const qtyText = form.qty.value.trim().replace(',', '.')
-        if (!/^\d+(\.\d+)?$/.test(qtyText)) throw new Error('Escribe la cantidad con números')
-        const data = { finding_name: name, lot_number: form.lot_free.value.trim(), qty_entered: qtyText, unit_entered: form.unit.value, location: form.location.value.trim(), notes: form.notes.value.trim() }
-        enqueue({ client_uuid: newUuid(), ...data }, { ...data, lot_number: data.lot_number || 'S/N' })
-        await flushQueue()
-        toast('Hallazgo registrado', 'success')
+        const data = { ...readQtyFields(form), lot_number: form.lot_free.value.trim(), location: form.location.value.trim(), notes: form.notes.value.trim() }
+        if (line) {
+          await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'PUT', body: data })
+          toast('Hallazgo actualizado', 'success')
+        } else {
+          enqueue({ client_uuid: newUuid(), finding_name: name, ...data }, { finding_name: name, ...data, lot_number: data.lot_number || 'S/N' })
+          await flushQueue()
+          toast('Hallazgo registrado', 'success')
+        }
         await refreshLines()
       },
     })
-  })
+    dialog.querySelector('#line-delete')?.addEventListener('click', async () => {
+      try {
+        await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'DELETE' })
+        dialog.close()
+        toast('Registro borrado')
+        await refreshLines()
+      } catch (err) { reportError(err) }
+    })
+  }
+
+  document.getElementById('finding-new').addEventListener('click', () => openFindingDialog())
 
   const onSync = () => { paintSync(); paintMine(); paintFailed() }
   document.addEventListener('count-sync', onSync)
@@ -1517,7 +1702,7 @@ async function viewCountReview(main, isCurrent, countId) {
         <h3>Hallazgos (${pendingFindings.length} pendientes)</h3>
         <div class="mini-list">${findings.map((f) => `
           <div class="mini-row">
-            <span><strong>${esc(f.finding_name)}</strong> · ${esc(fmtQty(f.qty_entered, f.unit_entered))} · lote ${esc(f.lot_number)}${f.location ? ` · ${esc(f.location)}` : ''} · ${esc(f.counted_by_name || '')}${f.notes ? `<br><span class="hint">${esc(f.notes)}</span>` : ''}</span>
+            <span><strong>${esc(f.finding_name)}</strong> · ${esc(lineQtyText(f))} · lote ${esc(f.lot_number)}${f.location ? ` · ${esc(f.location)}` : ''} · ${esc(f.counted_by_name || '')}${f.notes ? `<br><span class="hint">${esc(f.notes)}</span>` : ''}</span>
             ${f.finding_status === 'pendiente' && editable
               ? `<span class="row-actions"><button class="btn btn-secondary btn-sm" type="button" data-assign="${f.id}">Asignar</button><button class="btn btn-ghost btn-sm" type="button" data-discard="${f.id}">Descartar</button></span>`
               : `<span class="badge ${f.finding_status === 'asignado' ? 'badge-success' : ''}">${f.finding_status === 'asignado' ? `Asignado a ${esc((items.find((i) => i.chemical_id === f.chemical_id) || {}).code || '')}` : esc(f.finding_status)}</span>`}
@@ -1573,7 +1758,7 @@ async function viewCountReview(main, isCurrent, countId) {
               </tbody>
             </table>` : '<p class="hint">Sin lotes.</p>'}
           ${i.lines.length ? `<div class="ri-lines"><strong>Registros</strong>${i.lines.map((l) => `
-            <div>${esc(fmtQty(l.qty_entered, l.unit_entered))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || '')} · ${esc(fmtDate(l.counted_at))}${l.finding_name ? ` · hallazgo "${esc(l.finding_name)}"` : ''}</div>`).join('')}</div>` : ''}
+            <div>${esc(lineQtyText(l, i.unit))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || '')} · ${esc(fmtDate(l.counted_at))}${l.finding_name ? ` · hallazgo "${esc(l.finding_name)}"` : ''}</div>`).join('')}</div>` : ''}
           <p class="hint">Precio de referencia ${esc(fmtMoney(i.unit_price))} por ${esc(i.unit)}${i.moved_during_count ? ' · Saldo hoy: ' + esc(fmtQty(i.current_qty, i.unit)) : ''}</p>
           ${editable ? `<div class="row-actions">
             ${count.status === 'abierto' ? `<button class="btn btn-secondary btn-sm" type="button" data-recount="${i.chemical_id}">Pedir reconteo</button>` : ''}

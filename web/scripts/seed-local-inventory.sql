@@ -15,11 +15,11 @@ DELETE FROM inventory_counts;
 DELETE FROM chemical_lots WHERE chemical_id IN (SELECT id FROM chemicals WHERE code LIKE 'PRB-%');
 DELETE FROM chemicals WHERE code LIKE 'PRB-%';
 
-INSERT INTO chemicals (id, name, code, chemical_type, unit, stock_quantity, lab_quantity, last_unit_price, created_by) VALUES
-  (9001, 'ACIDO ACETICO PRUEBA', 'PRB-001', 'acido', 'kg', 12, 1, 5000, 1),
-  (9002, 'SAL INDUSTRIAL PRUEBA', 'PRB-002', 'auxiliar', 'kg', 5, 0, 800, 1),
-  (9003, 'COLORANTE ROJO PRUEBA', 'PRB-003', 'reactivo', 'kg', 3, 0, 90000, 1),
-  (9004, 'SUAVIZANTE PRUEBA', 'PRB-004', 'auxiliar', 'kg', 0, 0, 7000, 1);
+INSERT INTO chemicals (id, name, code, chemical_type, unit, stock_quantity, lab_quantity, last_unit_price, density_g_ml, created_by) VALUES
+  (9001, 'ACIDO ACETICO PRUEBA', 'PRB-001', 'acido', 'kg', 12, 1, 5000, 1.05, 1),
+  (9002, 'SAL INDUSTRIAL PRUEBA', 'PRB-002', 'auxiliar', 'kg', 5, 0, 800, NULL, 1),
+  (9003, 'COLORANTE ROJO PRUEBA', 'PRB-003', 'reactivo', 'kg', 3, 0, 90000, NULL, 1),
+  (9004, 'SUAVIZANTE PRUEBA', 'PRB-004', 'auxiliar', 'kg', 0, 0, 7000, NULL, 1);
 
 INSERT INTO chemical_lots (id, chemical_id, lot_number, quantity_received, quantity_remaining, lab_quantity, unit) VALUES
   (9101, 9001, '2609C1001', 8, 8, 1, 'kg'),
