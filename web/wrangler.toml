@@ -1,0 +1,32 @@
+# Portal web de consulta. Worker separado del puente de Python (worker/).
+# Usa la misma base D1, pero solo con consultas fijas: nunca SQL libre
+# y nunca tablas de recetas, pesajes ni bitácora de procesos.
+name = "tintoreria-web"
+main = "src/index.js"
+compatibility_date = "2026-09-04"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# El Worker atiende todo primero para poner cabeceras de seguridad también al HTML.
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tintoreria"
+database_id = "6ef9874f-5829-4617-8856-1549a670d69f"
+migrations_dir = "../worker/migrations"
+
+[vars]
+# Minutos sin actividad antes de cerrar la sesión.
+SESSION_IDLE_MINUTES = "30"
+# Duración máxima de una sesión, aunque haya actividad.
+SESSION_MAX_HOURS = "12"
+# Iteraciones PBKDF2 para contraseñas nuevas. Cloudflare admite hasta 100000.
+# Si el plan gratuito corta el login por CPU, bajar este valor; las contraseñas
+# existentes siguen funcionando y se reprocesan solas al subirlo de nuevo.
+PBKDF2_ITERATIONS = "100000"
+# Turnstile (captcha de Cloudflare) es opcional. Para activarlo:
+#   1. Poner aquí la site key:  TURNSTILE_SITE_KEY = "0x..."
+#   2. Guardar la clave secreta: npx wrangler secret put TURNSTILE_SECRET
+TURNSTILE_SITE_KEY = ""

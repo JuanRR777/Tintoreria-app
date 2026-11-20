@@ -1,0 +1,19 @@
+{
+  "name": "tintoreria-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Portal web de consulta e inventario para Tintoreria de Hilos (Cloudflare Worker + D1)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply tintoreria --local",
+    "db:migrate:remote": "wrangler d1 migrations apply tintoreria --remote",
+    "admin:local": "node scripts/create-admin.mjs --local",
+    "admin:remote": "node scripts/create-admin.mjs --remote",
+    "test:smoke": "node scripts/smoke-test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.2"
+  }
+}

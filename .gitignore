@@ -23,6 +23,10 @@ ui/out/
 ui/build/
 worker/node_modules/
 worker/.wrangler/
+web/node_modules/
+web/.wrangler/
+web/.dev.vars
+.wrangler/
 
 # Code signing (never commit private keys)
 *.pfx
