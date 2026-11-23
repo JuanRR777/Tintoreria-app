@@ -336,14 +336,14 @@ export async function listLines(request, env, rawId, url) {
     `SELECT l.id, l.chemical_id, l.finding_name, l.finding_status, l.lot_id, l.lot_number,
             l.qty, l.qty_entered, l.unit_entered, l.location, l.notes, l.client_uuid,
             l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit,
-            l.counted_by, l.counted_at, l.updated_at,
+            l.counted_by, l.counted_at, l.updated_at, l.edit_count,
             i.code, i.name, i.unit, u.full_name AS counted_by_name
      FROM inventory_count_lines l
      LEFT JOIN inventory_count_items i ON i.count_id = l.count_id AND i.chemical_id = l.chemical_id
      LEFT JOIN web_users u ON u.id = l.counted_by
      WHERE l.count_id = ? AND l.deleted_at IS NULL AND l.superseded_at IS NULL
        AND (l.finding_status IS NULL OR l.finding_status != 'descartado') ${filter}
-     ORDER BY l.id DESC LIMIT 500`,
+     ORDER BY l.id DESC LIMIT 3000`,
   )
   const { results } = await (chemicalId ? stmt.bind(count.id, parseId(chemicalId, 'Producto')) : stmt.bind(count.id)).all()
   return json({
@@ -421,6 +421,89 @@ async function resolveLineInput(env, count, body) {
 const LINE_SELECT = `SELECT l.*, i.code, i.name, i.unit FROM inventory_count_lines l
   LEFT JOIN inventory_count_items i ON i.count_id = l.count_id AND i.chemical_id = l.chemical_id`
 
+// ---------------------------------------------------------------------------
+// Historial de registros (solo se agrega; el portal no lo modifica)
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_FIELDS = [
+  'chemical_id', 'finding_name', 'finding_status', 'lot_number', 'qty', 'qty_entered', 'unit_entered',
+  'package_type', 'package_count', 'package_content', 'package_unit', 'loose_qty', 'loose_unit', 'location', 'notes',
+]
+
+/** json_object(...) de SQLite con los mismos campos que snapshot(), para copiar filas en una sola sentencia. */
+const SNAPSHOT_SQL = `json_object(${SNAPSHOT_FIELDS.map((f) => `'${f}', l.${f}`).join(', ')})`
+
+function snapshot(row) {
+  const out = {}
+  for (const field of SNAPSHOT_FIELDS) out[field] = row[field] ?? null
+  return out
+}
+
+function sameSnapshot(a, b) {
+  return SNAPSHOT_FIELDS.every((field) => String(a[field] ?? '') === String(b[field] ?? ''))
+}
+
+function readReason(body, what) {
+  const reason = upper(cleanText(body.reason, 200, 'El motivo'))
+  if (!reason || reason.length < 3) throw new HttpError(400, `Escribe el motivo ${what} (mínimo 3 letras)`)
+  return reason
+}
+
+function historyStmt(env, { lineId, countId, chemicalId, action, reason = null, before = null, after = null, user }) {
+  return env.DB.prepare(
+    `INSERT INTO inventory_count_line_history
+       (line_id, count_id, chemical_id, action, reason, before_json, after_json, user_id, username)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    lineId, countId, chemicalId ?? null, action, reason,
+    before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null,
+    user ? user.id : null, user ? user.username : null,
+  )
+}
+
+function qtyLabel(snap, unit) {
+  const value = Number(snap.qty)
+  const text = Number.isFinite(value) ? String(Math.round(value * 1000) / 1000).replace('.', ',') : '?'
+  return `${text} ${unit || snap.unit_entered || ''}`.trim()
+}
+
+export async function lineHistory(request, env, rawId, url) {
+  const { user } = await requireUser(request, env, 'count.register')
+  const count = await loadCount(env, parseId(rawId))
+  if (!can(user.role, 'count.approve') && count.status !== 'abierto') throw new HttpError(404, 'Conteo no disponible')
+  const lineId = url.searchParams.get('line_id')
+  const chemicalId = url.searchParams.get('chemical_id')
+  if (!lineId && !chemicalId) throw new HttpError(400, 'Indica el producto o el registro')
+  // Por producto: también los hallazgos que se le asignaron (al crearse no tenían producto).
+  const filter = lineId
+    ? 'h.line_id = ?'
+    : '(h.chemical_id = ? OR h.line_id IN (SELECT id FROM inventory_count_lines WHERE count_id = ? AND chemical_id = ?))'
+  const target = parseId(lineId || chemicalId, 'Registro')
+  const binds = lineId ? [count.id, target] : [count.id, target, count.id, target]
+  const { results } = await env.DB.prepare(
+    `SELECT h.id, h.line_id, h.chemical_id, h.action, h.reason, h.before_json, h.after_json, h.created_at,
+            h.username, u.full_name AS user_name
+     FROM inventory_count_line_history h
+     LEFT JOIN web_users u ON u.id = h.user_id
+     WHERE h.count_id = ? AND ${filter}
+     ORDER BY h.id DESC LIMIT 300`,
+  ).bind(...binds).all()
+  const parse = (text) => { try { return text ? JSON.parse(text) : null } catch { return null } }
+  return json({
+    items: (results || []).map((h) => ({
+      id: h.id,
+      line_id: h.line_id,
+      chemical_id: h.chemical_id,
+      action: h.action,
+      reason: h.reason,
+      before: parse(h.before_json),
+      after: parse(h.after_json),
+      created_at: h.created_at,
+      user_name: h.user_name || h.username || null,
+    })),
+  })
+}
+
 export async function createLine(request, env, rawId) {
   const { user } = await requireUser(request, env, 'count.register')
   const count = await loadCount(env, parseId(rawId))
@@ -449,6 +532,16 @@ export async function createLine(request, env, rawId) {
       line.location, line.notes, uuid, user.id, count.id,
     ),
   ]
+  // "Creado" en el historial, una sola vez aunque el celular reenvíe el registro.
+  statements.push(
+    env.DB.prepare(
+      `INSERT INTO inventory_count_line_history (line_id, count_id, chemical_id, action, after_json, user_id, username)
+       SELECT l.id, l.count_id, l.chemical_id, 'creado', ${SNAPSHOT_SQL}, ?, ?
+       FROM inventory_count_lines l
+       WHERE l.count_id = ? AND l.client_uuid = ?
+         AND NOT EXISTS (SELECT 1 FROM inventory_count_line_history h WHERE h.line_id = l.id AND h.action = 'creado')`,
+    ).bind(user.id, user.username, count.id, uuid),
+  )
   if (line.chemical_id) {
     statements.push(
       env.DB.prepare('UPDATE inventory_count_items SET recount_requested_at = NULL WHERE count_id = ? AND chemical_id = ?')
@@ -501,18 +594,33 @@ export async function updateLine(request, env, rawId, rawLineId) {
     notes: body.notes !== undefined ? body.notes : current.notes,
   }
   const line = await resolveLineInput(env, count, merged)
-  await env.DB.prepare(
-    `UPDATE inventory_count_lines
-     SET lot_id = ?, lot_number = ?, qty = ?, qty_entered = ?, unit_entered = ?,
-         package_type = ?, package_count = ?, package_content = ?, package_unit = ?, loose_qty = ?, loose_unit = ?,
-         location = ?, notes = ?, updated_at = datetime('now')
-     WHERE id = ?`,
-  ).bind(
-    line.lot_id, line.lot_number, line.qty, line.qty_entered, line.unit_entered,
-    line.package_type, line.package_count, line.package_content, line.package_unit, line.loose_qty, line.loose_unit,
-    line.location, line.notes, current.id,
-  ).run()
+  const before = snapshot(current)
+  // Producto, nombre y estado del hallazgo no se editan aquí: se conservan los actuales.
+  const after = snapshot({
+    ...current, ...line,
+    chemical_id: current.chemical_id, finding_name: current.finding_name, finding_status: current.finding_status,
+  })
+  if (sameSnapshot(before, after)) throw new HttpError(400, 'No cambiaste nada en el registro')
+  const reason = readReason(body, 'del cambio')
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE inventory_count_lines
+       SET lot_id = ?, lot_number = ?, qty = ?, qty_entered = ?, unit_entered = ?,
+           package_type = ?, package_count = ?, package_content = ?, package_unit = ?, loose_qty = ?, loose_unit = ?,
+           location = ?, notes = ?, edit_count = edit_count + 1, updated_at = datetime('now')
+       WHERE id = ? AND deleted_at IS NULL AND superseded_at IS NULL`,
+    ).bind(
+      line.lot_id, line.lot_number, line.qty, line.qty_entered, line.unit_entered,
+      line.package_type, line.package_count, line.package_content, line.package_unit, line.loose_qty, line.loose_unit,
+      line.location, line.notes, current.id,
+    ),
+    historyStmt(env, { lineId: current.id, countId: count.id, chemicalId: current.chemical_id, action: 'editado', reason, before, after, user }),
+  ])
   const saved = await env.DB.prepare(`${LINE_SELECT} WHERE l.id = ?`).bind(current.id).first()
+  const label = saved.name || saved.finding_name
+  await audit(env, request, user, 'count_line_edited',
+    `#${count.id} ${label}: ${qtyLabel(before, saved.unit)} → ${qtyLabel(after, saved.unit)} · ${reason}`)
   return json({ line: saved })
 }
 
@@ -521,7 +629,20 @@ export async function deleteLine(request, env, rawId, rawLineId) {
   const count = await loadCount(env, parseId(rawId))
   assertStatus(count, ['abierto'], 'borrar registros')
   const line = await editableLine(env, count, user, rawLineId)
-  await env.DB.prepare("UPDATE inventory_count_lines SET deleted_at = datetime('now') WHERE id = ?").bind(line.id).run()
+  const body = await readJson(request)
+  const reason = readReason(body, 'para borrarlo')
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE inventory_count_lines SET deleted_at = datetime('now'), deleted_by = ?, delete_reason = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+    ).bind(user.id, reason, line.id),
+    historyStmt(env, { lineId: line.id, countId: count.id, chemicalId: line.chemical_id, action: 'borrado', reason, before: snapshot(line), user }),
+  ])
+  const item = line.chemical_id
+    ? await env.DB.prepare('SELECT name, unit FROM inventory_count_items WHERE count_id = ? AND chemical_id = ?').bind(count.id, line.chemical_id).first()
+    : null
+  await audit(env, request, user, 'count_line_deleted',
+    `#${count.id} ${item ? item.name : line.finding_name}: ${qtyLabel(line, item?.unit)} · ${reason}`)
   return json({ ok: true })
 }
 
@@ -565,7 +686,7 @@ export function cancelCount(request, env, rawId) {
 
 async function buildReview(env, count) {
   const balance = balanceFor(count)
-  const [items, counted, current, moved, snapLots, curLots, linesByLot, lines] = await env.DB.batch([
+  const [items, counted, current, moved, snapLots, curLots, linesByLot, lines, deletedLines] = await env.DB.batch([
     env.DB.prepare('SELECT * FROM inventory_count_items WHERE count_id = ?').bind(count.id),
     env.DB.prepare(
       `SELECT chemical_id, ROUND(SUM(qty), 6) AS qty, COUNT(*) AS n FROM inventory_count_lines
@@ -594,12 +715,31 @@ async function buildReview(env, count) {
     env.DB.prepare(
       `SELECT l.id, l.chemical_id, l.finding_name, l.finding_status, l.lot_id, l.lot_number, l.qty,
               l.qty_entered, l.unit_entered, l.location, l.notes, l.counted_at, u.full_name AS counted_by_name,
-              l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit
+              l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit,
+              l.edit_count
        FROM inventory_count_lines l LEFT JOIN web_users u ON u.id = l.counted_by
        WHERE l.count_id = ? AND l.deleted_at IS NULL AND l.superseded_at IS NULL
        ORDER BY l.id`,
     ).bind(count.id),
+    // Registros borrados: se muestran tachados con quién y por qué.
+    env.DB.prepare(
+      `SELECT l.id, l.chemical_id, l.finding_name, l.lot_number, l.qty, l.qty_entered, l.unit_entered,
+              l.package_type, l.package_count, l.package_content, l.package_unit, l.loose_qty, l.loose_unit,
+              l.location, l.counted_at, l.deleted_at, l.delete_reason,
+              c.full_name AS counted_by_name, d.full_name AS deleted_by_name
+       FROM inventory_count_lines l
+       LEFT JOIN web_users c ON c.id = l.counted_by
+       LEFT JOIN web_users d ON d.id = l.deleted_by
+       WHERE l.count_id = ? AND l.deleted_at IS NOT NULL
+       ORDER BY l.id`,
+    ).bind(count.id),
   ])
+  const deletedByItem = new Map()
+  for (const line of deletedLines.results || []) {
+    const key = line.chemical_id || 0
+    if (!deletedByItem.has(key)) deletedByItem.set(key, [])
+    deletedByItem.get(key).push(line)
+  }
 
   const mapBy = (rows, key = 'chemical_id') => new Map((rows.results || []).map((r) => [r[key], r]))
   const countedMap = mapBy(counted)
@@ -632,7 +772,7 @@ async function buildReview(env, count) {
 
   const summary = {
     items_total: 0, items_counted: 0, items_resolved: 0, unresolved_with_stock: 0,
-    differences: 0, value_total: 0, moved: 0, lines_total: allLines.length, findings_pending: 0,
+    differences: 0, value_total: 0, moved: 0, lines_total: allLines.length, findings_pending: 0, changed: 0,
   }
   const outItems = (items.results || []).map((i) => {
     const c = countedMap.get(i.chemical_id)
@@ -653,6 +793,10 @@ async function buildReview(env, count) {
     const lots = [...(lotsByItem.get(i.chemical_id)?.values() || [])]
       .filter((l) => l.system_qty > EPS || l.current_qty > EPS || l.counted_qty > EPS)
       .map((l) => ({ ...l, diff: round6(l.counted_qty - l.system_qty) }))
+    const itemLines = linesByItem.get(i.chemical_id) || []
+    const deleted = deletedByItem.get(i.chemical_id) || []
+    const edits = itemLines.reduce((sum, l) => sum + Number(l.edit_count || 0), 0)
+    if (edits || deleted.length) summary.changed += 1
     return {
       chemical_id: i.chemical_id,
       code: i.code,
@@ -672,7 +816,9 @@ async function buildReview(env, count) {
       needs_resolution: !resolved && currentQty > EPS,
       moved_during_count: movedDuring,
       lots,
-      lines: linesByItem.get(i.chemical_id) || [],
+      lines: itemLines,
+      deleted_lines: deleted,
+      edits,
     }
   })
   outItems.sort((a, b) => Math.abs(b.value || 0) - Math.abs(a.value || 0) || a.name.localeCompare(b.name, 'es'))
@@ -680,7 +826,7 @@ async function buildReview(env, count) {
   const findings = allLines.filter((l) => l.finding_status)
   summary.findings_pending = findings.filter((l) => l.finding_status === 'pendiente').length
   summary.value_total = Math.round(summary.value_total)
-  return { count: publicCount(count), summary, items: outItems, findings }
+  return { count: publicCount(count), summary, items: outItems, findings, deleted_findings: deletedByItem.get(0) || [] }
 }
 
 export async function reviewCount(request, env, rawId) {
@@ -728,6 +874,13 @@ export async function requestRecount(request, env, rawId, rawChemicalId) {
     .bind(count.id, chemicalId).first()
   if (!item) throw new HttpError(404, 'Producto no encontrado en el conteo')
   await env.DB.batch([
+    // Primero el historial (con la foto de cada registro), luego se descartan.
+    env.DB.prepare(
+      `INSERT INTO inventory_count_line_history (line_id, count_id, chemical_id, action, reason, before_json, user_id, username)
+       SELECT l.id, l.count_id, l.chemical_id, 'reconteo', 'RECONTEO PEDIDO POR EL ADMINISTRADOR', ${SNAPSHOT_SQL}, ?, ?
+       FROM inventory_count_lines l
+       WHERE l.count_id = ? AND l.chemical_id = ? AND l.deleted_at IS NULL AND l.superseded_at IS NULL`,
+    ).bind(user.id, user.username, count.id, chemicalId),
     env.DB.prepare(
       `UPDATE inventory_count_lines SET superseded_at = datetime('now')
        WHERE count_id = ? AND chemical_id = ? AND deleted_at IS NULL AND superseded_at IS NULL`,
@@ -754,9 +907,15 @@ export async function resolveFinding(request, env, rawId, rawLineId) {
   const body = await readJson(request)
 
   if (body.action === 'discard') {
-    await env.DB.prepare(
-      "UPDATE inventory_count_lines SET finding_status = 'descartado', chemical_id = NULL, lot_id = NULL, updated_at = datetime('now') WHERE id = ?",
-    ).bind(line.id).run()
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE inventory_count_lines SET finding_status = 'descartado', chemical_id = NULL, lot_id = NULL, updated_at = datetime('now') WHERE id = ?",
+      ).bind(line.id),
+      historyStmt(env, {
+        lineId: line.id, countId: count.id, chemicalId: line.chemical_id, action: 'descartado',
+        before: snapshot(line), after: { ...snapshot(line), chemical_id: null, finding_status: 'descartado' }, user,
+      }),
+    ])
     await audit(env, request, user, 'count_finding_discarded', `#${count.id} ${line.finding_name}`)
     return json({ ok: true })
   }
@@ -789,6 +948,13 @@ export async function resolveFinding(request, env, rawId, rawLineId) {
       `UPDATE inventory_count_lines SET chemical_id = ?, finding_status = 'asignado', lot_id = ?, lot_number = ?,
          qty = ?, updated_at = datetime('now') WHERE id = ?`,
     ).bind(chemicalId, lot ? lot.id : null, lotNumber, qty, line.id),
+    historyStmt(env, {
+      lineId: line.id, countId: count.id, chemicalId, action: 'asignado',
+      reason: `ASIGNADO A ${chem.code} ${chem.name}`,
+      before: snapshot(line),
+      after: { ...snapshot(line), chemical_id: chemicalId, finding_status: 'asignado', lot_number: lotNumber, qty },
+      user,
+    }),
   ])
   await audit(env, request, user, 'count_finding_assigned', `#${count.id} ${line.finding_name} → ${chem.code}`)
   return json({ ok: true })

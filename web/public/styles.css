@@ -447,6 +447,24 @@ dialog::backdrop { background: rgba(2, 6, 23, 0.55); }
 /* ---------------------------------------------------------------------------
    Conteo físico
    --------------------------------------------------------------------------- */
+/* Historial de registros */
+.history-box { margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; }
+.history-box > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; font-size: 14px; }
+.history-box > div { padding: 0 14px 12px; }
+.history-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.history-item { padding: 10px 12px; border-left: 3px solid var(--border-strong); background: #f6f8fb; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; display: grid; gap: 3px; }
+.history-item.is-creado { border-left-color: var(--success); }
+.history-item.is-editado { border-left-color: var(--warning); background: #fffbeb; }
+.history-item.is-borrado { border-left-color: var(--danger); background: #fef2f2; }
+.history-item.is-reconteo { border-left-color: var(--warning); }
+.history-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.history-who { font-size: 12px; color: var(--muted); }
+.history-change { font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.history-reason { font-size: 13px; color: var(--text-2); font-style: italic; overflow-wrap: anywhere; }
+.reason-field { padding: 10px 12px; border-radius: var(--radius-sm); background: #fffbeb; border: 1px solid #fde68a; }
+.ri-deleted { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); }
+.ri-history-btn { justify-self: start; margin-top: 4px; }
+.mini-row.is-deleted { opacity: 0.85; }
 .cred-card { display: grid; gap: 2px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 12px; }
 .cred-row { display: grid; gap: 2px; padding: 10px 14px; background: #f6f8fb; }
 .cred-row span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }

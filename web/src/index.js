@@ -10,7 +10,7 @@ import { createUser, listUsers, resetPassword, unlockUser, updateUser } from './
 import { createWarehouse, listWarehouses, updateWarehouse } from './warehouses.js'
 import {
   applyCount, cancelCount, closeCount, confirmZero, confirmZeroAll, createLine, deleteLine, exportCount,
-  getCount, listCounts, listLines, markSiesaAdjusted, openCount, reopenCount, requestRecount, resolveFinding,
+  getCount, lineHistory, listCounts, listLines, markSiesaAdjusted, openCount, reopenCount, requestRecount, resolveFinding,
   reviewCount, updateLine,
 } from './counts.js'
 
@@ -39,6 +39,7 @@ const routes = [
   ['PUT', /^\/api\/counts\/(\d+)\/lines\/(\d+)$/, (req, env, m) => updateLine(req, env, m[1], m[2])],
   ['DELETE', /^\/api\/counts\/(\d+)\/lines\/(\d+)$/, (req, env, m) => deleteLine(req, env, m[1], m[2])],
   ['GET', /^\/api\/counts\/(\d+)\/review$/, (req, env, m) => reviewCount(req, env, m[1])],
+  ['GET', /^\/api\/counts\/(\d+)\/history$/, (req, env, m, url) => lineHistory(req, env, m[1], url)],
   ['GET', /^\/api\/counts\/(\d+)\/export\.csv$/, (req, env, m) => exportCount(req, env, m[1])],
   ['POST', /^\/api\/counts\/(\d+)\/close$/, (req, env, m) => closeCount(req, env, m[1])],
   ['POST', /^\/api\/counts\/(\d+)\/reopen$/, (req, env, m) => reopenCount(req, env, m[1])],

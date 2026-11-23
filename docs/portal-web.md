@@ -62,7 +62,8 @@ Menú **Conteo físico** (roles administrador y almacén).
    - cada lote queda igual a lo contado (0 si no se encontró) y los lotes nuevos se crean,
    - el total del producto queda igual a la suma de sus lotes,
    - cada cambio genera un movimiento `adjustment` con referencia `conteo` (o `conteo_lab`) a nombre del usuario administrador de la app de escritorio; la nota dice quién lo aprobó en el portal.
-7. **SIESA**: *Descargar diferencias* genera un CSV (separado por `;`, decimales con coma) por producto y lote. Tras el ajuste manual en SIESA, **Marcar ajustado en SIESA**.
+7. **Historial de registros**: editar o borrar un registro solo lo puede hacer quien lo registró o un administrador, solo con el conteo abierto, y exige **motivo**. Cada registro guarda su historial (creado, editado con valor antes → después, borrado, descartado por reconteo, hallazgo asignado o descartado) con quién y cuándo, en `inventory_count_line_history`; el portal solo agrega entradas, no las cambia. Se ve en «Ver registro» y en la revisión (filtro «Con cambios», registros borrados tachados, botón «Ver historial de cambios»). Ediciones y borrados también quedan en **Actividad**.
+8. **SIESA**: *Descargar diferencias* genera un CSV (separado por `;`, decimales con coma) por producto y lote. Tras el ajuste manual en SIESA, **Marcar ajustado en SIESA**.
 
 **Protección en la app de escritorio (desde 1.0.8):** no deja importar el informe de inventario de SIESA mientras haya un conteo de Principal abierto, en revisión, o aplicado sin marcar como ajustado en SIESA; si se importara, reemplazaría lo contado.
 

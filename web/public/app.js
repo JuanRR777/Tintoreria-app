@@ -964,6 +964,8 @@ const AUDIT_LABELS = {
   count_recount: ['Pidió reconteo', 'warning'],
   count_finding_assigned: ['Asignó hallazgo', 'primary'],
   count_finding_discarded: ['Descartó hallazgo', 'warning'],
+  count_line_edited: ['Editó registro', 'warning'],
+  count_line_deleted: ['Borró registro', 'danger'],
 }
 
 async function viewAudit(main, isCurrent) {
@@ -1078,6 +1080,119 @@ function lineQtyText(line, itemUnit) {
   if (Number(line.loose_qty) > 0) text += ` + ${fmtQty(line.loose_qty, unitLabel(line.loose_unit))} suelto`
   if (itemUnit && line.qty !== null && line.qty !== undefined) text += ` = ${fmtQty(line.qty, unitLabel(itemUnit))}`
   return text
+}
+
+// ---------------------------------------------------------------------------
+// Historial de registros
+// ---------------------------------------------------------------------------
+
+const HISTORY_ACTIONS = {
+  creado: ['Registrado', 'success'],
+  editado: ['Editado', 'warning'],
+  borrado: ['Borrado', 'danger'],
+  reconteo: ['Descartado por reconteo', 'warning'],
+  asignado: ['Hallazgo asignado', 'primary'],
+  descartado: ['Hallazgo descartado', ''],
+}
+
+/** Cantidad de una "foto" del registro: total en la unidad del producto y, si aplica, cómo se contó. */
+function snapshotQty(snap, unit) {
+  if (!snap) return '—'
+  const target = unit || snap.package_unit || snap.unit_entered
+  if (snap.package_type) return lineQtyText({ ...snap, qty: snap.qty }, target)
+  const total = fmtQty(snap.qty, unitLabel(target))
+  return snap.unit_entered && snap.unit_entered !== target ? `${total} (${fmtQty(snap.qty_entered, unitLabel(snap.unit_entered))})` : total
+}
+
+function historyChanges(entry, unit) {
+  const { before, after } = entry
+  if (entry.action === 'creado') return [`Cantidad: ${snapshotQty(after, unit)}`, `Lote: ${after?.lot_number || 'S/N'}`]
+  if (entry.action === 'borrado' || entry.action === 'reconteo') return [`Tenía: ${snapshotQty(before, unit)} · lote ${before?.lot_number || 'S/N'}`]
+  if (!before || !after) return []
+  const out = []
+  const qtyBefore = snapshotQty(before, unit)
+  const qtyAfter = snapshotQty(after, unit)
+  if (qtyBefore !== qtyAfter) out.push(`Cantidad: ${qtyBefore} → ${qtyAfter}`)
+  if ((before.lot_number || 'S/N') !== (after.lot_number || 'S/N')) out.push(`Lote: ${before.lot_number || 'S/N'} → ${after.lot_number || 'S/N'}`)
+  if ((before.location || '') !== (after.location || '')) out.push(`Ubicación: ${before.location || '—'} → ${after.location || '—'}`)
+  if ((before.notes || '') !== (after.notes || '')) out.push(`Nota: ${before.notes || '—'} → ${after.notes || '—'}`)
+  return out
+}
+
+function historyHtml(entries, unitFor) {
+  if (!entries.length) return '<p class="hint">Sin cambios registrados todavía.</p>'
+  return `<ol class="history-list">${entries.map((entry) => {
+    const [label, tone] = HISTORY_ACTIONS[entry.action] || [entry.action, '']
+    const changes = historyChanges(entry, unitFor(entry))
+    return `
+      <li class="history-item is-${esc(entry.action)}">
+        <div class="history-top">
+          <span class="badge${tone ? ` badge-${tone}` : ''}">${esc(label)}</span>
+          <span class="history-who">${esc(entry.user_name || 'Sin nombre')} · ${esc(fmtDateTime(entry.created_at))}</span>
+        </div>
+        ${changes.map((c) => `<div class="history-change">${esc(c)}</div>`).join('')}
+        ${entry.reason ? `<div class="history-reason">Motivo: ${esc(entry.reason)}</div>` : ''}
+      </li>`
+  }).join('')}</ol>`
+}
+
+/** Carga el historial dentro de un contenedor de una ventana ya abierta. */
+async function fillHistory(host, countId, query, unitFor) {
+  if (!host) return
+  host.innerHTML = '<p class="hint">Cargando historial…</p>'
+  try {
+    const { items } = await api(`/api/counts/${countId}/history?${query}`)
+    host.innerHTML = historyHtml(items, unitFor)
+    const counter = host.closest('details')?.querySelector('[data-history-count]')
+    if (counter) counter.textContent = String(items.length)
+  } catch (err) {
+    host.innerHTML = `<p class="hint">${esc(err.status === 0 ? 'Sin señal: el historial se verá cuando vuelva la conexión.' : err.message)}</p>`
+  }
+}
+
+function historySectionHtml(open = false) {
+  return `
+    <details class="history-box" ${open ? 'open' : ''}>
+      <summary>Historial de cambios (<span data-history-count>…</span>)</summary>
+      <div data-history></div>
+    </details>`
+}
+
+/** Pide el motivo antes de borrar un registro. */
+function confirmDeleteRecord(countId, line, onDone) {
+  openDialog({
+    title: 'Borrar registro',
+    submitLabel: 'Borrar',
+    body: `
+      <p class="notice notice-warning">El registro deja de contar, pero queda en el historial con quién lo borró y por qué.</p>
+      <div class="field">
+        <label for="reason">Motivo (obligatorio)</label>
+        <input data-upper autocapitalize="characters" class="input" id="reason" name="reason" maxlength="200" placeholder="Ej: lo registré dos veces">
+      </div>`,
+    onOpen: (form) => form.reason.focus(),
+    onSubmit: async (form) => {
+      const reason = form.reason.value.trim()
+      if (reason.length < 3) throw new Error('Escribe el motivo (mínimo 3 letras)')
+      await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'DELETE', body: { reason } })
+      toast('Registro borrado')
+      await onDone()
+    },
+  })
+}
+
+function reasonFieldHtml() {
+  return `
+    <div class="field reason-field">
+      <label for="reason">Motivo del cambio (obligatorio)</label>
+      <input data-upper autocapitalize="characters" class="input" id="reason" name="reason" maxlength="200" placeholder="Ej: conté mal, era otro lote">
+      <span class="hint">Queda en el historial junto con el valor anterior.</span>
+    </div>`
+}
+
+function readReason(form) {
+  const reason = form.reason.value.trim()
+  if (reason.length < 3) throw new Error('Escribe el motivo del cambio (mínimo 3 letras)')
+  return reason
 }
 
 function numText(value) {
@@ -1468,6 +1583,7 @@ async function viewCountEntry(main, isCurrent, countId) {
   let filter = 'todos'
   let query = ''
   let itemsPage = 1
+  let linesLoaded = false // hasta tener los registros reales se usa el número que trajo el catálogo
   const ITEMS_PER_PAGE = 15
 
   main.innerHTML = `
@@ -1533,7 +1649,7 @@ async function viewCountEntry(main, isCurrent, countId) {
   }
 
   function itemMatches(item) {
-    const counted = item.lines > 0 || linesFor(item.chemical_id).length > 0 || pendingFor(item.chemical_id).length > 0
+    const counted = (linesLoaded ? 0 : item.lines) + linesFor(item.chemical_id).length + pendingFor(item.chemical_id).length > 0
     if (filter === 'pendientes' && counted) return false
     if (filter === 'contados' && !counted) return false
     if (!query) return true
@@ -1577,7 +1693,7 @@ async function viewCountEntry(main, isCurrent, countId) {
     if (pagerTop) pagerTop.innerHTML = pagerMiniHtml(paged, 'items')
     host.innerHTML = shown.length ? shown.map((item) => {
       const records = recordsFor(item)
-      const n = Math.max(item.lines + pendingFor(item.chemical_id).length, records.length)
+      const n = linesLoaded ? records.length : Math.max(item.lines + pendingFor(item.chemical_id).length, records.length)
       return `
         <div class="card item-pick${n ? ' is-counted' : ''}" data-item="${item.chemical_id}" role="button" tabindex="0"
              aria-label="${esc(item.name)}${n ? `, ${n} registro${n === 1 ? '' : 's'}` : ', sin contar'}">
@@ -1619,6 +1735,7 @@ async function viewCountEntry(main, isCurrent, countId) {
           <span class="avatar avatar-sm" aria-hidden="true">${esc(initials(who))}</span>
           <strong class="record-who">${esc(who)}</strong>
           ${r.pending ? '<span class="badge badge-warning">Sin enviar</span>' : ''}
+          ${Number(r.edit_count) > 0 ? `<span class="badge badge-warning" title="Editado ${r.edit_count} ${Number(r.edit_count) === 1 ? 'vez' : 'veces'}">Editado${Number(r.edit_count) > 1 ? ` ×${r.edit_count}` : ''}</span>` : ''}
           ${canEditRecord(r) ? `<button type="button" class="btn btn-ghost btn-sm" data-edit-record="${r.id}">Editar</button>` : ''}
         </header>
         <div class="record-qty">${esc(qtyText)}</div>
@@ -1653,10 +1770,12 @@ async function viewCountEntry(main, isCurrent, countId) {
         <div class="records-total">Total contado <strong>${esc(fmtQty(total, unitLabel(item.unit)))}</strong></div>
         <div class="records">
           ${records.map((r) => recordCardHtml(r, { qtyText: fmtQty(r.qtyItem, unitLabel(item.unit)), newLot: isNewLot(item, r) })).join('')}
-        </div>`,
+        </div>
+        ${historySectionHtml(records.some((r) => Number(r.edit_count) > 0))}`,
       onSubmit: async () => { setTimeout(() => openItemEntry(item), 0) },
     })
     bindRecordEdits(dialog, openLineEditor)
+    fillHistory(dialog.querySelector('[data-history]'), countId, `chemical_id=${item.chemical_id}`, () => item.unit)
   }
 
   /** Total de un hallazgo en la unidad con que se registró (aún no tiene producto). */
@@ -1677,10 +1796,17 @@ async function viewCountEntry(main, isCurrent, countId) {
       body: `
         <p class="dialog-sub"><span class="badge badge-warning">Hallazgo</span> pendiente de asignar a un producto</p>
         <p class="notice notice-warning">No está en el catálogo. En la revisión, el administrador lo asigna a un producto (y ahí pasa a su fila verde) o lo descarta.</p>
-        <div class="records">${recordCardHtml(l, { qtyText: findingQtyText(l) })}</div>`,
+        <div class="records">${recordCardHtml(l, { qtyText: findingQtyText(l) })}</div>
+        ${l.id ? historySectionHtml(Number(l.edit_count) > 0) : ''}`,
       onSubmit: async () => { setTimeout(() => openFindingDialog(), 0) },
     })
     bindRecordEdits(dialog, openFindingDialog)
+    if (l.id) {
+      fillHistory(dialog.querySelector('[data-history]'), countId, `line_id=${l.id}`, (entry) => {
+        const snap = entry.after || entry.before || {}
+        return snap.package_unit || snap.unit_entered
+      })
+    }
   }
 
   /** Hallazgos (productos fuera del catálogo) como filas propias al final de la lista. */
@@ -1716,6 +1842,7 @@ async function viewCountEntry(main, isCurrent, countId) {
     try {
       const data = await api(`/api/counts/${countId}/lines`)
       lines = data.items
+      linesLoaded = true
     } catch (err) {
       if (err.status !== 0) reportError(err)
     }
@@ -1817,22 +1944,19 @@ async function viewCountEntry(main, isCurrent, countId) {
       title: `Editar · ${item.name}`,
       submitLabel: 'Guardar cambios',
       body: `${lineFields({ item, line })}
+        ${reasonFieldHtml()}
         <button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>`,
       onOpen: (form) => { bindLotSelect(form); bindQtyFields(form, item) },
       onSubmit: async (form) => {
-        const data = readLineForm(form)
+        const data = { ...readLineForm(form), reason: readReason(form) }
         await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'PUT', body: data })
         toast('Registro actualizado', 'success')
         await refreshLines()
       },
     })
-    dialog.querySelector('#line-delete').addEventListener('click', async () => {
-      try {
-        await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'DELETE' })
-        dialog.close()
-        toast('Registro borrado')
-        await refreshLines()
-      } catch (err) { reportError(err) }
+    dialog.querySelector('#line-delete').addEventListener('click', () => {
+      dialog.close()
+      confirmDeleteRecord(countId, line, refreshLines)
     })
   }
 
@@ -1882,7 +2006,7 @@ async function viewCountEntry(main, isCurrent, countId) {
         ${qtyFieldsHtml({ units: unitsFor(null), simpleUnits: ['kg', 'g', 'L', 'mL', 'gal', 'und'], line })}
         <div class="field"><label for="location">Ubicación (opcional)</label><input data-upper autocapitalize="characters" class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}"></div>
         <div class="field"><label for="notes">Nota (opcional)</label><input data-upper autocapitalize="characters" class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: envase sin etiqueta completa" value="${esc(line?.notes || '')}"></div>
-        ${line ? '<button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>' : ''}`,
+        ${line ? `${reasonFieldHtml()}<button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>` : ''}`,
       onOpen: (form) => {
         bindQtyFields(form, null)
         if (!line) form.finding_name.focus()
@@ -1892,6 +2016,7 @@ async function viewCountEntry(main, isCurrent, countId) {
         if (name.length < 3) throw new Error('Escribe el nombre (mínimo 3 letras)')
         const data = { ...readQtyFields(form), lot_number: form.lot_free.value.trim(), location: form.location.value.trim(), notes: form.notes.value.trim() }
         if (line) {
+          data.reason = readReason(form)
           await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'PUT', body: data })
           toast('Hallazgo actualizado', 'success')
         } else {
@@ -1902,13 +2027,9 @@ async function viewCountEntry(main, isCurrent, countId) {
         await refreshLines()
       },
     })
-    dialog.querySelector('#line-delete')?.addEventListener('click', async () => {
-      try {
-        await api(`/api/counts/${countId}/lines/${line.id}`, { method: 'DELETE' })
-        dialog.close()
-        toast('Registro borrado')
-        await refreshLines()
-      } catch (err) { reportError(err) }
+    dialog.querySelector('#line-delete')?.addEventListener('click', () => {
+      dialog.close()
+      confirmDeleteRecord(countId, line, refreshLines)
     })
   }
 
@@ -1964,6 +2085,7 @@ async function viewCountReview(main, isCurrent, countId) {
   const data = await api(`/api/counts/${countId}/review`)
   if (!isCurrent()) return
   const { count, summary, items, findings } = data
+  const deletedFindings = data.deleted_findings || []
   if (!reviewState.has(countId)) {
     reviewState.set(countId, { filter: summary.differences ? 'diferencias' : 'todos', itemsPage: 1, zeroPage: 1 })
   }
@@ -2012,6 +2134,7 @@ async function viewCountReview(main, isCurrent, countId) {
 
     ${count.status === 'aplicado' ? `<p class="notice">Aplicado ${esc(fmtDate(count.applied_at))}. El inventario de la app ya muestra lo contado. Descarga las diferencias para hacer el ajuste manual en SIESA.</p>` : ''}
     ${summary.moved ? `<p class="notice notice-warning">${esc(summary.moved)} producto(s) tuvieron movimientos durante el conteo (entradas, consumos o traslados). Revísalos antes de aplicar: al aplicar, el saldo queda igual a lo contado.</p>` : ''}
+    ${summary.changed ? `<p class="notice notice-warning">${esc(summary.changed)} producto(s) tienen registros editados o borrados. Revisa su historial antes de aplicar (filtro «Con cambios»).</p>` : ''}
 
     ${editable && unresolved.length ? `
       <section class="card card-pad attention">
@@ -2025,7 +2148,7 @@ async function viewCountReview(main, isCurrent, countId) {
         ${count.status === 'revision' ? '<button class="btn btn-secondary" type="button" data-act="zero-all">Confirmar en cero todo lo no contado</button>' : ''}
       </section>` : ''}
 
-    ${findings.length ? `
+    ${findings.length || deletedFindings.length ? `
       <section class="card card-pad attention">
         <h3>Hallazgos (${pendingFindings.length} pendientes)</h3>
         <div class="mini-list">${findings.map((f) => `
@@ -2034,6 +2157,12 @@ async function viewCountReview(main, isCurrent, countId) {
             ${f.finding_status === 'pendiente' && editable
               ? `<span class="row-actions"><button class="btn btn-secondary btn-sm" type="button" data-assign="${f.id}">Asignar</button><button class="btn btn-ghost btn-sm" type="button" data-discard="${f.id}">Descartar</button></span>`
               : `<span class="badge ${f.finding_status === 'asignado' ? 'badge-success' : ''}">${f.finding_status === 'asignado' ? `Asignado a ${esc((items.find((i) => i.chemical_id === f.chemical_id) || {}).code || '')}` : esc(f.finding_status)}</span>`}
+          </div>`).join('')}
+          ${deletedFindings.map((f) => `
+          <div class="mini-row is-deleted">
+            <span><s><strong>${esc(f.finding_name)}</strong> · ${esc(lineQtyText(f))} · lote ${esc(f.lot_number)}</s><br>
+              <span class="hint">Borrado por ${esc(f.deleted_by_name || '—')} · ${esc(fmtDateTime(f.deleted_at))} · Motivo: ${esc(f.delete_reason || '—')}</span></span>
+            <span class="badge badge-danger">Borrado</span>
           </div>`).join('')}
         </div>
       </section>` : ''}
@@ -2044,6 +2173,7 @@ async function viewCountReview(main, isCurrent, countId) {
         <button type="button" class="chip" data-filter="todos">Todos (${esc(summary.items_total)})</button>
         <button type="button" class="chip" data-filter="sin-contar">Sin contar</button>
         <button type="button" class="chip" data-filter="movidos">Con movimientos (${esc(summary.moved)})</button>
+        <button type="button" class="chip" data-filter="cambios">Con cambios (${esc(summary.changed || 0)})</button>
       </div>
       <div class="pager-slot" id="review-pager-top"></div>
       <div class="review-head" aria-hidden="true"><span>Producto</span><span>Sistema</span><span>Contado</span><span>Diferencia</span><span>Valor</span></div>
@@ -2069,6 +2199,7 @@ async function viewCountReview(main, isCurrent, countId) {
     if (filter === 'diferencias') return i.diff !== null && Math.abs(i.diff) > 0.0000005
     if (filter === 'sin-contar') return !i.resolved
     if (filter === 'movidos') return i.moved_during_count > 0
+    if (filter === 'cambios') return i.edits > 0 || i.deleted_lines.length > 0
     return true
   }
 
@@ -2088,6 +2219,7 @@ async function viewCountReview(main, isCurrent, countId) {
               ${i.confirmed_zero && !i.has_lines ? '<span class="badge badge-info">Confirmado en cero</span>' : ''}
               ${i.recount_requested ? '<span class="badge badge-warning">Reconteo pedido</span>' : ''}
               ${i.moved_during_count ? `<span class="badge badge-warning">${esc(i.moved_during_count)} mov. durante el conteo</span>` : ''}
+              ${i.edits || i.deleted_lines.length ? `<span class="badge badge-danger">${esc(i.edits + i.deleted_lines.length)} cambio${i.edits + i.deleted_lines.length === 1 ? '' : 's'}</span>` : ''}
             </span>
           </span>
           <span class="ri-num" data-label="Sistema">${esc(fmtQty(i.system_qty, i.unit))}</span>
@@ -2105,8 +2237,14 @@ async function viewCountReview(main, isCurrent, countId) {
                 <td class="${diffClass(l.diff)}">${esc(fmtSigned(l.diff))}</td>${count.status === 'aplicado' ? '' : `<td>${esc(fmtQty(l.current_qty))}</td>`}</tr>`).join('')}
               </tbody>
             </table>` : '<p class="hint">Sin lotes.</p>'}
-          ${i.lines.length ? `<div class="ri-lines"><strong>Registros</strong>${i.lines.map((l) => `
-            <div>${esc(lineQtyText(l, i.unit))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || '')} · ${esc(fmtDate(l.counted_at))}${l.finding_name ? ` · hallazgo "${esc(l.finding_name)}"` : ''}</div>`).join('')}</div>` : ''}
+          ${i.lines.length || i.deleted_lines.length ? `<div class="ri-lines"><strong>Registros</strong>${i.lines.map((l) => `
+            <div>${esc(lineQtyText(l, i.unit))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || '')} · ${esc(fmtDate(l.counted_at))}${l.finding_name ? ` · hallazgo "${esc(l.finding_name)}"` : ''}${Number(l.edit_count) ? ` <span class="badge badge-warning">Editado${Number(l.edit_count) > 1 ? ` ×${esc(l.edit_count)}` : ''}</span>` : ''}</div>`).join('')}
+            ${i.deleted_lines.map((l) => `
+            <div class="ri-deleted"><s>${esc(lineQtyText(l, i.unit))} · lote ${esc(l.lot_number)} · ${esc(l.counted_by_name || '')}</s>
+              <span class="badge badge-danger">Borrado</span>
+              <span class="hint">por ${esc(l.deleted_by_name || '—')} · ${esc(fmtDateTime(l.deleted_at))} · Motivo: ${esc(l.delete_reason || '—')}</span></div>`).join('')}
+            <button class="btn btn-ghost btn-sm ri-history-btn" type="button" data-history-item="${i.chemical_id}">Ver historial de cambios</button>
+          </div>` : ''}
           <p class="hint">Precio de referencia ${esc(fmtMoney(i.unit_price))} por ${esc(i.unit)}${i.moved_during_count ? ' · Saldo hoy: ' + esc(fmtQty(i.current_qty, i.unit)) : ''}</p>
           ${editable ? `<div class="row-actions">
             ${count.status === 'abierto' ? `<button class="btn btn-secondary btn-sm" type="button" data-recount="${i.chemical_id}">Pedir reconteo</button>` : ''}
@@ -2151,6 +2289,19 @@ async function viewCountReview(main, isCurrent, countId) {
     if (zero) {
       zero.disabled = true
       try { await act(`items/${zero.dataset.zero}/confirm-zero`, { confirm: zero.dataset.on !== '0' }, 'Actualizado') } catch (err) { zero.disabled = false; reportError(err) }
+      return
+    }
+    const historyBtn = event.target.closest('[data-history-item]')
+    if (historyBtn) {
+      const item = items.find((i) => i.chemical_id === Number(historyBtn.dataset.historyItem))
+      const dialog = openDialog({
+        title: `Historial · ${item.name}`,
+        submitLabel: 'Cerrar',
+        cancelLabel: null,
+        body: `<p class="dialog-sub"><code>${esc(item.code)}</code> · registros, ediciones, borrados y reconteos de este conteo</p><div data-history></div>`,
+        onSubmit: async () => {},
+      })
+      fillHistory(dialog.querySelector('[data-history]'), count.id, `chemical_id=${item.chemical_id}`, () => item.unit)
       return
     }
     const recount = event.target.closest('[data-recount]')

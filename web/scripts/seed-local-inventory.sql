@@ -8,6 +8,7 @@ INSERT OR IGNORE INTO users (id, username, email, password_hash, full_name, role
 VALUES (1, 'admin', 'admin@tintoreria.local', 'no-usar', 'Administrador app', 1);
 
 DELETE FROM stock_movements WHERE chemical_id IN (SELECT id FROM chemicals WHERE code LIKE 'PRB-%');
+DELETE FROM inventory_count_line_history;
 DELETE FROM inventory_count_lines WHERE count_id IN (SELECT id FROM inventory_counts);
 DELETE FROM inventory_count_lots;
 DELETE FROM inventory_count_items;
