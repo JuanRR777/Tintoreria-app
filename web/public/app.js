@@ -1246,6 +1246,60 @@ function diffClass(value) {
   return 'num-zero'
 }
 
+// ---------------------------------------------------------------------------
+// Paginación (en el navegador: las listas ya vienen completas del servidor)
+// ---------------------------------------------------------------------------
+
+function paginate(list, page, size) {
+  const total = list.length
+  const pages = Math.max(1, Math.ceil(total / size))
+  const current = Math.min(Math.max(1, page), pages)
+  const start = (current - 1) * size
+  return {
+    rows: list.slice(start, start + size),
+    page: current,
+    pages,
+    total,
+    from: total ? start + 1 : 0,
+    to: Math.min(start + size, total),
+  }
+}
+
+/** Números visibles: primera, última y vecinas de la actual, con "…" en los saltos. */
+function pageNumbers(page, pages) {
+  const wanted = new Set([1, pages, page - 1, page, page + 1])
+  const list = [...wanted].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b)
+  const out = []
+  list.forEach((n, idx) => {
+    if (idx && n - list[idx - 1] > 1) out.push('…')
+    out.push(n)
+  })
+  return out
+}
+
+/** Control de páginas. En celular: Anterior · rango · Siguiente. En escritorio también números. */
+function pagerHtml(p, name) {
+  if (p.pages <= 1) return ''
+  const btn = (target, label, extra = '') => `<button type="button" class="pager-btn${extra}" data-pager="${name}" data-page="${target}" ${target < 1 || target > p.pages ? 'disabled' : ''}>${label}</button>`
+  return `
+    <nav class="pager" aria-label="Paginación">
+      ${btn(p.page - 1, '<span aria-hidden="true">‹</span> Anterior', ' pager-step')}
+      <span class="pager-info">${p.from}–${p.to} de ${p.total}</span>
+      <span class="pager-pages">
+        ${pageNumbers(p.page, p.pages).map((n) => (n === '…'
+          ? '<span class="pager-gap">…</span>'
+          : `<button type="button" class="pager-btn pager-num${n === p.page ? ' is-current' : ''}" data-pager="${name}" data-page="${n}" ${n === p.page ? 'aria-current="page"' : ''}>${n}</button>`)).join('')}
+      </span>
+      ${btn(p.page + 1, 'Siguiente <span aria-hidden="true">›</span>', ' pager-step')}
+    </nav>`
+}
+
+function scrollToTopOf(el) {
+  if (!el) return
+  const top = el.getBoundingClientRect().top + window.scrollY - 72
+  if (top < window.scrollY) window.scrollTo({ top, behavior: 'smooth' })
+}
+
 function storeGet(key, fallback) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback } catch { return fallback }
 }
@@ -1396,6 +1450,8 @@ async function viewCountEntry(main, isCurrent, countId) {
   let lines = []
   let filter = 'todos'
   let query = ''
+  let itemsPage = 1
+  const ITEMS_PER_PAGE = 15
 
   main.innerHTML = `
     <div class="page-head">
@@ -1419,6 +1475,7 @@ async function viewCountEntry(main, isCurrent, countId) {
       </div>
     </div>
     <div class="list item-list" id="count-items"></div>
+    <div id="count-pager"></div>
     <div class="list item-list finding-rows" id="finding-rows"></div>`
 
   const linesFor = (chemicalId) => lines.filter((l) => l.chemical_id === chemicalId)
@@ -1493,7 +1550,11 @@ async function viewCountEntry(main, isCurrent, countId) {
   function paintItems() {
     const host = document.getElementById('count-items')
     if (!host) return
-    const shown = items.filter(itemMatches).slice(0, 80)
+    const paged = paginate(items.filter(itemMatches), itemsPage, ITEMS_PER_PAGE)
+    itemsPage = paged.page
+    const shown = paged.rows
+    const pager = document.getElementById('count-pager')
+    if (pager) pager.innerHTML = pagerHtml(paged, 'items')
     host.innerHTML = shown.length ? shown.map((item) => {
       const records = recordsFor(item)
       const n = Math.max(item.lines + pendingFor(item.chemical_id).length, records.length)
@@ -1757,13 +1818,22 @@ async function viewCountEntry(main, isCurrent, countId) {
 
   document.getElementById('count-search').addEventListener('input', (event) => {
     query = event.target.value.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    itemsPage = 1
     paintItems()
   })
   main.querySelectorAll('[data-filter]').forEach((chip) => chip.addEventListener('click', () => {
     filter = chip.dataset.filter
     main.querySelectorAll('[data-filter]').forEach((c) => c.classList.toggle('active', c === chip))
+    itemsPage = 1
     paintItems()
   }))
+  document.getElementById('count-pager').addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-pager="items"]')
+    if (!btn || btn.disabled) return
+    itemsPage = Number(btn.dataset.page)
+    paintItems()
+    scrollToTopOf(document.querySelector('.search-bar'))
+  })
   const itemList = document.getElementById('count-items')
   itemList.addEventListener('click', (event) => {
     const more = event.target.closest('[data-more]')
@@ -1863,11 +1933,20 @@ async function viewCountEntry(main, isCurrent, countId) {
 
 // --- Revisión (administrador) ------------------------------------------------
 
+// Página y filtro de cada revisión: se conservan al recargar tras una acción.
+const reviewState = new Map()
+const REVIEW_PER_PAGE = 20
+const ZERO_PER_PAGE = 10
+
 async function viewCountReview(main, isCurrent, countId) {
   const data = await api(`/api/counts/${countId}/review`)
   if (!isCurrent()) return
   const { count, summary, items, findings } = data
-  let filter = summary.differences ? 'diferencias' : 'todos'
+  if (!reviewState.has(countId)) {
+    reviewState.set(countId, { filter: summary.differences ? 'diferencias' : 'todos', itemsPage: 1, zeroPage: 1 })
+  }
+  const view = reviewState.get(countId)
+  let filter = view.filter
   const editable = ['abierto', 'revision'].includes(count.status)
 
   const actions = []
@@ -1916,10 +1995,8 @@ async function viewCountReview(main, isCurrent, countId) {
       <section class="card card-pad attention">
         <h3>Con existencias y sin contar (${unresolved.length})</h3>
         <p class="hint">Para aplicar, cuéntalos o confirma que no hay nada.</p>
-        <div class="mini-list">${unresolved.map((i) => `
-          <div class="mini-row"><span><strong>${esc(i.name)}</strong> <code>${esc(i.code)}</code> · sistema ${esc(fmtQty(i.system_qty, i.unit))}</span>
-          <button class="btn btn-secondary btn-sm" type="button" data-zero="${i.chemical_id}">Confirmar en cero</button></div>`).join('')}
-        </div>
+        <div class="mini-list" id="zero-list"></div>
+        <div id="zero-pager"></div>
         ${count.status === 'revision' ? '<button class="btn btn-secondary" type="button" data-act="zero-all">Confirmar en cero todo lo no contado</button>' : ''}
       </section>` : ''}
 
@@ -1944,8 +2021,20 @@ async function viewCountReview(main, isCurrent, countId) {
     </div>
     <div class="review-head" aria-hidden="true"><span>Producto</span><span>Sistema</span><span>Contado</span><span>Diferencia</span><span>Valor</span></div>
     <div class="list" id="review-items"></div>
+    <div id="review-pager"></div>
   </div>`
   const root = document.getElementById('review-root')
+
+  function paintUnresolved() {
+    const host = document.getElementById('zero-list')
+    if (!host) return
+    const paged = paginate(unresolved, view.zeroPage, ZERO_PER_PAGE)
+    view.zeroPage = paged.page
+    host.innerHTML = paged.rows.map((i) => `
+      <div class="mini-row"><span><strong>${esc(i.name)}</strong> <code>${esc(i.code)}</code> · sistema ${esc(fmtQty(i.system_qty, i.unit))}</span>
+      <button class="btn btn-secondary btn-sm" type="button" data-zero="${i.chemical_id}">Confirmar en cero</button></div>`).join('')
+    document.getElementById('zero-pager').innerHTML = pagerHtml(paged, 'zero')
+  }
 
   function itemVisible(i) {
     if (filter === 'diferencias') return i.diff !== null && Math.abs(i.diff) > 0.0000005
@@ -1956,7 +2045,10 @@ async function viewCountReview(main, isCurrent, countId) {
 
   function paintReview() {
     root.querySelectorAll('[data-filter]').forEach((c) => c.classList.toggle('active', c.dataset.filter === filter))
-    const shown = items.filter(itemVisible)
+    const paged = paginate(items.filter(itemVisible), view.itemsPage, REVIEW_PER_PAGE)
+    view.itemsPage = paged.page
+    const shown = paged.rows
+    document.getElementById('review-pager').innerHTML = pagerHtml(paged, 'review')
     document.getElementById('review-items').innerHTML = shown.length ? shown.map((i) => `
       <details class="card review-item">
         <summary>
@@ -2004,7 +2096,27 @@ async function viewCountReview(main, isCurrent, countId) {
 
   root.addEventListener('click', async (event) => {
     const chip = event.target.closest('[data-filter]')
-    if (chip) { filter = chip.dataset.filter; paintReview(); return }
+    if (chip) {
+      filter = chip.dataset.filter
+      view.filter = filter
+      view.itemsPage = 1
+      paintReview()
+      return
+    }
+    const pageBtn = event.target.closest('[data-pager]')
+    if (pageBtn) {
+      if (pageBtn.disabled) return
+      if (pageBtn.dataset.pager === 'zero') {
+        view.zeroPage = Number(pageBtn.dataset.page)
+        paintUnresolved()
+        scrollToTopOf(root.querySelector('.attention'))
+      } else {
+        view.itemsPage = Number(pageBtn.dataset.page)
+        paintReview()
+        scrollToTopOf(root.querySelector('.review-chips'))
+      }
+      return
+    }
     const zero = event.target.closest('[data-zero]')
     if (zero) {
       zero.disabled = true
@@ -2117,6 +2229,7 @@ async function viewCountReview(main, isCurrent, countId) {
     })
   }
 
+  paintUnresolved()
   paintReview()
 }
 
