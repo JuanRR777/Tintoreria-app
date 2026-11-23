@@ -1294,10 +1294,27 @@ function pagerHtml(p, name) {
     </nav>`
 }
 
+/** Versión compacta (‹ 1–15 de 68 ›) para barras fijas arriba: siempre a la vista. */
+function pagerMiniHtml(p, name) {
+  if (p.pages <= 1) return ''
+  const btn = (target, label, aria) => `<button type="button" class="pager-btn pager-icon" data-pager="${name}" data-page="${target}" aria-label="${aria}" ${target < 1 || target > p.pages ? 'disabled' : ''}>${label}</button>`
+  return `
+    <nav class="pager-mini" aria-label="Paginación">
+      ${btn(p.page - 1, '‹', 'Página anterior')}
+      <span class="pager-mini-info">${p.from}–${p.to} de ${p.total}</span>
+      ${btn(p.page + 1, '›', 'Página siguiente')}
+    </nav>`
+}
+
+/** Sube hasta el inicio de la lista, dejándola visible debajo de las barras fijas. */
 function scrollToTopOf(el) {
   if (!el) return
-  const top = el.getBoundingClientRect().top + window.scrollY - 72
-  if (top < window.scrollY) window.scrollTo({ top, behavior: 'smooth' })
+  const bars = [...document.querySelectorAll('.topbar, .search-bar, .review-toolbar')]
+    .filter((bar) => bar.offsetParent !== null && getComputedStyle(bar).position === 'sticky')
+  // Las barras fijas se apilan: lo que tapa es el borde inferior más bajo (su "top" + su alto).
+  const offset = bars.reduce((low, bar) => Math.max(low, (parseFloat(getComputedStyle(bar).top) || 0) + bar.getBoundingClientRect().height), 0) + 8
+  const top = Math.max(0, el.getBoundingClientRect().top + window.scrollY - offset)
+  if (top < window.scrollY - 2) window.scrollTo({ top, behavior: 'smooth' })
 }
 
 function storeGet(key, fallback) {
@@ -1471,6 +1488,7 @@ async function viewCountEntry(main, isCurrent, countId) {
           <button type="button" class="chip" data-filter="pendientes">Sin contar</button>
           <button type="button" class="chip" data-filter="contados">Contados</button>
         </span>
+        <div class="pager-slot" id="count-pager-top"></div>
         <button type="button" class="chip chip-finding" id="finding-new">+ No está en la lista</button>
       </div>
     </div>
@@ -1555,6 +1573,8 @@ async function viewCountEntry(main, isCurrent, countId) {
     const shown = paged.rows
     const pager = document.getElementById('count-pager')
     if (pager) pager.innerHTML = pagerHtml(paged, 'items')
+    const pagerTop = document.getElementById('count-pager-top')
+    if (pagerTop) pagerTop.innerHTML = pagerMiniHtml(paged, 'items')
     host.innerHTML = shown.length ? shown.map((item) => {
       const records = recordsFor(item)
       const n = Math.max(item.lines + pendingFor(item.chemical_id).length, records.length)
@@ -1827,13 +1847,15 @@ async function viewCountEntry(main, isCurrent, countId) {
     itemsPage = 1
     paintItems()
   }))
-  document.getElementById('count-pager').addEventListener('click', (event) => {
+  const onItemsPage = (event) => {
     const btn = event.target.closest('[data-pager="items"]')
     if (!btn || btn.disabled) return
     itemsPage = Number(btn.dataset.page)
     paintItems()
-    scrollToTopOf(document.querySelector('.search-bar'))
-  })
+    scrollToTopOf(document.getElementById('count-items'))
+  }
+  document.getElementById('count-pager').addEventListener('click', onItemsPage)
+  document.getElementById('count-pager-top').addEventListener('click', onItemsPage)
   const itemList = document.getElementById('count-items')
   itemList.addEventListener('click', (event) => {
     const more = event.target.closest('[data-more]')
@@ -1993,7 +2015,10 @@ async function viewCountReview(main, isCurrent, countId) {
 
     ${editable && unresolved.length ? `
       <section class="card card-pad attention">
-        <h3>Con existencias y sin contar (${unresolved.length})</h3>
+        <div class="attention-head">
+          <h3>Con existencias y sin contar (${unresolved.length})</h3>
+          <div class="pager-slot" id="zero-pager-top"></div>
+        </div>
         <p class="hint">Para aplicar, cuéntalos o confirma que no hay nada.</p>
         <div class="mini-list" id="zero-list"></div>
         <div id="zero-pager"></div>
@@ -2013,13 +2038,16 @@ async function viewCountReview(main, isCurrent, countId) {
         </div>
       </section>` : ''}
 
-    <div class="chips review-chips" role="group" aria-label="Filtrar productos">
-      <button type="button" class="chip" data-filter="diferencias">Con diferencia (${esc(summary.differences)})</button>
-      <button type="button" class="chip" data-filter="todos">Todos (${esc(summary.items_total)})</button>
-      <button type="button" class="chip" data-filter="sin-contar">Sin contar</button>
-      <button type="button" class="chip" data-filter="movidos">Con movimientos (${esc(summary.moved)})</button>
+    <div class="review-toolbar">
+      <div class="chips review-chips" role="group" aria-label="Filtrar productos">
+        <button type="button" class="chip" data-filter="diferencias">Con diferencia (${esc(summary.differences)})</button>
+        <button type="button" class="chip" data-filter="todos">Todos (${esc(summary.items_total)})</button>
+        <button type="button" class="chip" data-filter="sin-contar">Sin contar</button>
+        <button type="button" class="chip" data-filter="movidos">Con movimientos (${esc(summary.moved)})</button>
+      </div>
+      <div class="pager-slot" id="review-pager-top"></div>
+      <div class="review-head" aria-hidden="true"><span>Producto</span><span>Sistema</span><span>Contado</span><span>Diferencia</span><span>Valor</span></div>
     </div>
-    <div class="review-head" aria-hidden="true"><span>Producto</span><span>Sistema</span><span>Contado</span><span>Diferencia</span><span>Valor</span></div>
     <div class="list" id="review-items"></div>
     <div id="review-pager"></div>
   </div>`
@@ -2034,6 +2062,7 @@ async function viewCountReview(main, isCurrent, countId) {
       <div class="mini-row"><span><strong>${esc(i.name)}</strong> <code>${esc(i.code)}</code> · sistema ${esc(fmtQty(i.system_qty, i.unit))}</span>
       <button class="btn btn-secondary btn-sm" type="button" data-zero="${i.chemical_id}">Confirmar en cero</button></div>`).join('')
     document.getElementById('zero-pager').innerHTML = pagerHtml(paged, 'zero')
+    document.getElementById('zero-pager-top').innerHTML = pagerMiniHtml(paged, 'zero')
   }
 
   function itemVisible(i) {
@@ -2049,6 +2078,7 @@ async function viewCountReview(main, isCurrent, countId) {
     view.itemsPage = paged.page
     const shown = paged.rows
     document.getElementById('review-pager').innerHTML = pagerHtml(paged, 'review')
+    document.getElementById('review-pager-top').innerHTML = pagerMiniHtml(paged, 'review')
     document.getElementById('review-items').innerHTML = shown.length ? shown.map((i) => `
       <details class="card review-item">
         <summary>
@@ -2109,11 +2139,11 @@ async function viewCountReview(main, isCurrent, countId) {
       if (pageBtn.dataset.pager === 'zero') {
         view.zeroPage = Number(pageBtn.dataset.page)
         paintUnresolved()
-        scrollToTopOf(root.querySelector('.attention'))
+        scrollToTopOf(document.getElementById('zero-list'))
       } else {
         view.itemsPage = Number(pageBtn.dataset.page)
         paintReview()
-        scrollToTopOf(root.querySelector('.review-chips'))
+        scrollToTopOf(document.getElementById('review-items'))
       }
       return
     }
