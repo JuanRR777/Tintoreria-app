@@ -91,6 +91,28 @@ export async function verifyPassword(password, stored, iterations) {
   return { ok, iterations: parsed.iterations }
 }
 
+/**
+ * Las contraseñas no llevan espacios al inicio ni al final: al copiarlas de
+ * WhatsApp o de un correo suelen arrastrar un espacio o un salto de línea.
+ */
+export function cleanPassword(value) {
+  return String(value ?? '').trim()
+}
+
+/**
+ * Verifica ignorando espacios externos. Solo si alguien guardó una contraseña
+ * con espacios en los extremos (antes de esta regla) se prueba también tal cual.
+ * Devuelve además la variante que coincidió, para reprocesar el hash con ella.
+ */
+export async function verifyPasswordLenient(password, stored, iterations) {
+  const raw = String(password ?? '')
+  const trimmed = raw.trim()
+  const first = await verifyPassword(trimmed, stored, iterations)
+  if (first.ok || trimmed === raw || !stored) return { ...first, matched: trimmed }
+  const second = await verifyPassword(raw, stored, iterations)
+  return { ...second, matched: second.ok ? raw : trimmed }
+}
+
 /** Reglas de contraseña del portal (expuesto a internet: algo más estricto que la app). */
 export function passwordProblem(password, username = '') {
   const value = String(password || '')

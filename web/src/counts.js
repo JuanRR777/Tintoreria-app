@@ -144,6 +144,11 @@ function cleanText(value, max, label) {
   return text || null
 }
 
+/** Texto libre siempre en mayúsculas (ubicación, notas…). */
+function upper(text) {
+  return text ? text.toLocaleUpperCase('es-CO') : text
+}
+
 async function loadCount(env, id) {
   const row = await env.DB.prepare(
     `SELECT c.*, w.name AS warehouse_name, w.code AS warehouse_code, w.kind AS warehouse_kind
@@ -215,7 +220,7 @@ export async function openCount(request, env) {
   const { user } = await requireUser(request, env, 'count.approve')
   const body = await readJson(request)
   const warehouseId = parseId(body.warehouse_id, 'Bodega')
-  const notes = cleanText(body.notes, 200, 'La nota')
+  const notes = upper(cleanText(body.notes, 200, 'La nota'))
   const warehouse = await env.DB.prepare('SELECT * FROM warehouses WHERE id = ? AND is_active = 1').bind(warehouseId).first()
   if (!warehouse) throw new HttpError(404, 'Bodega no encontrada o inactiva')
   const balance = BALANCE[warehouse.kind]
@@ -350,8 +355,8 @@ async function resolveLineInput(env, count, body) {
   const pkg = readPackage(body)
   const unitEntered = pkg ? pkg.type : String(body.unit_entered || '').trim()
   const qtyEntered = pkg ? pkg.count : parseQty(body.qty_entered)
-  const location = cleanText(body.location, 40, 'La ubicación')
-  const notes = cleanText(body.notes, 200, 'La nota')
+  const location = upper(cleanText(body.location, 40, 'La ubicación'))
+  const notes = upper(cleanText(body.notes, 200, 'La nota'))
 
   if (body.chemical_id === undefined || body.chemical_id === null || body.chemical_id === '') {
     const name = cleanText(body.finding_name, 80, 'El nombre')

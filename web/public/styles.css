@@ -160,6 +160,10 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 }
 .input:focus, .select:focus { border-color: var(--primary); outline: 3px solid rgba(47, 95, 216, 0.18); outline-offset: 0; }
 .input[readonly] { background: #f6f8fb; }
+/* El valor ya se convierte con JS; esto evita ver un instante la minúscula y
+   deja la ayuda (placeholder) en su forma normal. */
+.input[data-upper] { text-transform: uppercase; }
+.input[data-upper]::placeholder { text-transform: none; }
 .input-group { display: flex; gap: 8px; }
 .input-group .input { flex: 1; min-width: 0; }
 @media (max-width: 460px) {
@@ -443,6 +447,13 @@ dialog::backdrop { background: rgba(2, 6, 23, 0.55); }
 /* ---------------------------------------------------------------------------
    Conteo físico
    --------------------------------------------------------------------------- */
+.cred-card { display: grid; gap: 2px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 12px; }
+.cred-row { display: grid; gap: 2px; padding: 10px 14px; background: #f6f8fb; }
+.cred-row span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.cred-row strong { font-size: 17px; overflow-wrap: anywhere; user-select: all; }
+.cred-pass { font-size: 22px !important; letter-spacing: 0.04em; color: var(--primary); }
+.cred-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.cred-actions .btn { flex: 1 1 200px; }
 .notice-danger { background: var(--danger-soft); color: #991b1b; }
 .notice > div { display: grid; gap: 6px; }
 .notice .btn { justify-self: start; margin-top: 4px; }

@@ -1,7 +1,7 @@
 /** Administración de usuarios del portal (solo administrador). */
 
 import { HttpError, json, readJson } from './http.js'
-import { clampIterations, hashPassword, passwordProblem } from './crypto.js'
+import { clampIterations, cleanPassword, hashPassword, passwordProblem } from './crypto.js'
 import { isRole } from './roles.js'
 import { publicUser, requireUser } from './auth.js'
 import { audit } from './audit.js'
@@ -16,7 +16,7 @@ const USER_COLUMNS = `id, username, full_name, email, role, is_active, must_chan
 function cleanName(value) {
   const name = String(value || '').trim().replace(/\s+/g, ' ')
   if (name.length < 3 || name.length > 80) throw new HttpError(400, 'El nombre debe tener entre 3 y 80 caracteres')
-  return name
+  return name.toLocaleUpperCase('es-CO')
 }
 
 function cleanEmail(value) {
@@ -75,7 +75,7 @@ export async function createUser(request, env) {
   const fullName = cleanName(body.full_name)
   const email = cleanEmail(body.email)
   const role = cleanRole(body.role)
-  const password = String(body.password || '')
+  const password = cleanPassword(body.password)
   const problem = passwordProblem(password, username)
   if (problem) throw new HttpError(400, problem)
 
@@ -137,7 +137,7 @@ export async function resetPassword(request, env, rawId) {
   const id = parseId(rawId)
   const target = await findUser(env, id)
   const body = await readJson(request)
-  const password = String(body.password || '')
+  const password = cleanPassword(body.password)
   const problem = passwordProblem(password, target.username)
   if (problem) throw new HttpError(400, problem)
 

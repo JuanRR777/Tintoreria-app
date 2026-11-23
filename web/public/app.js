@@ -218,6 +218,19 @@ for (const evt of ['pointerdown', 'keydown', 'touchstart', 'scroll']) {
   window.addEventListener(evt, () => { state.lastActivity = Date.now() }, { passive: true })
 }
 
+// Texto libre siempre en mayúsculas (nombres, lotes, ubicaciones, notas…).
+// Usuario, correo, contraseñas y búsquedas no llevan data-upper.
+document.addEventListener('input', (event) => {
+  const el = event.target
+  if (!el.matches || !el.matches('[data-upper]') || event.isComposing) return
+  const upper = el.value.toLocaleUpperCase('es-CO')
+  if (upper === el.value) return
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  el.value = upper
+  try { el.setSelectionRange(start, end) } catch { /* algunos tipos no lo permiten */ }
+})
+
 async function logout() {
   try { await api('/api/auth/logout', { method: 'POST', body: {} }) } catch { /* nada */ }
   clearSession()
@@ -263,7 +276,7 @@ function pwField(id, label, autocomplete, extra = '') {
     <div class="field">
       <label for="${id}">${esc(label)}</label>
       <div class="pw-wrap">
-        <input class="input" id="${id}" name="${id}" type="password" autocomplete="${autocomplete}" required maxlength="128" ${extra}>
+        <input class="input" id="${id}" name="${id}" type="password" autocomplete="${autocomplete}" autocapitalize="none" autocorrect="off" spellcheck="false" required maxlength="128" ${extra}>
         <button type="button" class="pw-toggle" data-toggle="${id}">Mostrar</button>
       </div>
     </div>`
@@ -565,7 +578,7 @@ function openDialog({ title, body, submitLabel = 'Guardar', cancelLabel = 'Cance
         ${body}
       </div>
       <div class="dialog-foot">
-        <button type="button" class="btn btn-secondary" data-close>${esc(cancelLabel)}</button>
+        ${cancelLabel ? `<button type="button" class="btn btn-secondary" data-close>${esc(cancelLabel)}</button>` : ''}
         <button type="submit" class="btn btn-primary">${esc(submitLabel)}</button>
       </div>
     </form>`
@@ -601,13 +614,53 @@ function tempPasswordField(username = '') {
     <div class="field">
       <label for="temp_password">Contraseña temporal</label>
       <div class="input-group">
-        <input class="input mono" id="temp_password" name="temp_password" autocomplete="off" spellcheck="false" required maxlength="128">
+        <input class="input mono" id="temp_password" name="temp_password" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required maxlength="128">
         <button class="btn btn-secondary" type="button" data-generate>Generar</button>
         <button class="btn btn-secondary" type="button" data-copy aria-label="Copiar contraseña">Copiar</button>
       </div>
       <ul class="rules">${rulesHtml('', username)}</ul>
       <span class="hint">Entrégala en persona. Al primer ingreso el usuario deberá cambiarla.</span>
     </div>`
+}
+
+/**
+ * Muestra la contraseña temporal exacta que quedó guardada, para copiarla de
+ * aquí y no de un campo que pudo cambiar. Incluye un mensaje listo para enviar.
+ */
+function showCredentials({ user, password, title }) {
+  const message = [
+    'Portal Tintorería de Hilos',
+    location.origin,
+    `Usuario: ${user.username}`,
+    `Contraseña temporal: ${password}`,
+    'Al ingresar te pedirá crear una contraseña nueva.',
+  ].join('\n')
+  const dialog = openDialog({
+    title,
+    submitLabel: 'Listo',
+    cancelLabel: null,
+    body: `
+      <p class="notice notice-warning">Copia estos datos ahora: por seguridad la contraseña no se vuelve a mostrar.</p>
+      <div class="cred-card">
+        <div class="cred-row"><span>Usuario</span><strong class="mono">${esc(user.username)}</strong></div>
+        <div class="cred-row"><span>Contraseña temporal</span><strong class="mono cred-pass">${esc(password)}</strong></div>
+      </div>
+      <div class="cred-actions">
+        <button class="btn btn-secondary" type="button" data-copy-cred="password">Copiar contraseña</button>
+        <button class="btn btn-primary" type="button" data-copy-cred="message">Copiar mensaje para enviar</button>
+      </div>
+      <p class="hint">Si la pegas en WhatsApp o en un correo, no importa si queda un espacio al final: el portal lo ignora.</p>`,
+    onSubmit: async () => {},
+  })
+  dialog.querySelectorAll('[data-copy-cred]').forEach((btn) => btn.addEventListener('click', async () => {
+    const text = btn.dataset.copyCred === 'password' ? password : message
+    try {
+      await navigator.clipboard.writeText(text)
+      toast(btn.dataset.copyCred === 'password' ? 'Contraseña copiada' : 'Mensaje copiado', 'success')
+    } catch {
+      toast('No se pudo copiar automáticamente. Selecciona el texto y cópialo.', 'error')
+    }
+  }))
 }
 
 function bindTempPassword(form, getUsername) {
@@ -702,10 +755,10 @@ async function viewWarehouses(main, isCurrent) {
       body: `
         <div class="field">
           <label for="code">Código</label>
-          <input class="input mono" id="code" name="code" required maxlength="20" autocapitalize="characters" placeholder="Ej: 10503">
+          <input data-upper class="input mono" id="code" name="code" required maxlength="20" autocapitalize="characters" placeholder="Ej: 10503">
           <span class="hint">Usa el mismo código de SIESA si existe. No se puede cambiar después.</span>
         </div>
-        <div class="field"><label for="name">Nombre</label><input class="input" id="name" name="name" required maxlength="60"></div>
+        <div class="field"><label for="name">Nombre</label><input data-upper autocapitalize="characters" class="input" id="name" name="name" required maxlength="60"></div>
         <div class="field"><label for="sort_order">Orden en las listas</label><input class="input" id="sort_order" name="sort_order" type="number" min="0" max="999" value="10" inputmode="numeric"></div>`,
       onSubmit: async (form) => {
         await api('/api/warehouses', {
@@ -725,7 +778,7 @@ async function viewWarehouses(main, isCurrent) {
         title: `Editar ${w.name}`,
         body: `
           <div class="field"><label>Código</label><input class="input mono" value="${esc(w.code)}" readonly></div>
-          <div class="field"><label for="name">Nombre</label><input class="input" id="name" name="name" required maxlength="60" value="${esc(w.name)}"></div>
+          <div class="field"><label for="name">Nombre</label><input data-upper autocapitalize="characters" class="input" id="name" name="name" required maxlength="60" value="${esc(w.name)}"></div>
           <div class="field"><label for="sort_order">Orden en las listas</label><input class="input" id="sort_order" name="sort_order" type="number" min="0" max="999" value="${esc(w.sort_order)}" inputmode="numeric"></div>
           ${w.fixed
             ? '<p class="notice">Esta bodega está enlazada con los saldos de la app de escritorio y no se puede desactivar.</p>'
@@ -791,7 +844,7 @@ async function viewUsers(main, isCurrent) {
       title: 'Nuevo usuario',
       submitLabel: 'Crear usuario',
       body: `
-        <div class="field"><label for="full_name">Nombre completo</label><input class="input" id="full_name" name="full_name" required maxlength="80" autocomplete="off"></div>
+        <div class="field"><label for="full_name">Nombre completo</label><input data-upper autocapitalize="characters" class="input" id="full_name" name="full_name" required maxlength="80" autocomplete="off"></div>
         <div class="field">
           <label for="username">Usuario</label>
           <input class="input mono" id="username" name="username" required maxlength="32" autocapitalize="none" spellcheck="false" autocomplete="off" placeholder="ej: maria.lopez">
@@ -811,18 +864,19 @@ async function viewUsers(main, isCurrent) {
         form.full_name.focus()
       },
       onSubmit: async (form) => {
-        await api('/api/users', {
+        const password = form.temp_password.value.trim()
+        const { user } = await api('/api/users', {
           method: 'POST',
           body: {
             full_name: form.full_name.value,
             username: form.username.value,
             email: form.email.value,
             role: form.role.value,
-            password: form.temp_password.value,
+            password,
           },
         })
-        toast('Usuario creado. Entrégale la contraseña temporal.', 'success')
         route()
+        setTimeout(() => showCredentials({ user, password, title: 'Usuario creado' }), 0)
       },
     })
   })
@@ -834,7 +888,7 @@ async function viewUsers(main, isCurrent) {
       title: `Editar ${u.full_name}`,
       body: `
         <div class="field"><label>Usuario</label><input class="input mono" value="${esc(u.username)}" readonly></div>
-        <div class="field"><label for="full_name">Nombre completo</label><input class="input" id="full_name" name="full_name" required maxlength="80" value="${esc(u.full_name)}"></div>
+        <div class="field"><label for="full_name">Nombre completo</label><input data-upper autocapitalize="characters" class="input" id="full_name" name="full_name" required maxlength="80" value="${esc(u.full_name)}"></div>
         <div class="field"><label for="email">Correo (opcional)</label><input class="input" id="email" name="email" type="email" maxlength="120" value="${esc(u.email)}"></div>
         <div class="field"><label for="role">Rol</label>${roleSelect(u.role)}<span class="hint">${esc(ROLE_HELP)}</span></div>
         <label class="check"><input type="checkbox" name="is_active" ${u.is_active ? 'checked' : ''} ${self ? 'disabled' : ''}> Cuenta activa</label>
@@ -865,10 +919,11 @@ async function viewUsers(main, isCurrent) {
         ${tempPasswordField(u.username)}`,
       onOpen: (form) => bindTempPassword(form, () => u.username),
       onSubmit: async (form) => {
-        await api(`/api/users/${u.id}/password`, { method: 'POST', body: { password: form.temp_password.value } })
-        toast('Contraseña restablecida. Entrégala en persona.', 'success')
+        const password = form.temp_password.value.trim()
+        await api(`/api/users/${u.id}/password`, { method: 'POST', body: { password } })
         if (u.id === state.user.id) { sessionEnded('Restableciste tu propia contraseña. Ingresa con la temporal.'); return }
         route()
+        setTimeout(() => showCredentials({ user: u, password, title: 'Contraseña restablecida' }), 0)
       },
     })
   }))
@@ -1066,7 +1121,7 @@ function qtyFieldsHtml({ units, simpleUnits, line, suggestion }) {
           ${PACKAGE_TYPES.map((t) => `<option value="${t}" ${base.type === t ? 'selected' : ''}>${esc(t[0].toUpperCase() + t.slice(1))}</option>`).join('')}
           <option value="__otro" ${typeKnown ? '' : 'selected'}>Otro…</option>
         </select>
-        <input class="input lot-other" name="package_other" maxlength="20" placeholder="Ej: tarro, frasco, galonera" value="${typeKnown ? '' : esc(base.type)}" ${typeKnown ? 'hidden' : ''}>
+        <input data-upper autocapitalize="characters" class="input lot-other" name="package_other" maxlength="20" placeholder="Ej: tarro, frasco, galonera" value="${typeKnown ? '' : esc(base.type)}" ${typeKnown ? 'hidden' : ''}>
       </div>
       <div class="pkg-grid">
         <div class="field">
@@ -1299,7 +1354,7 @@ async function viewCountList(main, isCurrent) {
             ${options.map((w) => `<option value="${w.id}">${esc(w.name)} (${esc(w.code)})</option>`).join('')}
           </select>
         </div>
-        <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: Inventario de cierre de noviembre"></div>
+        <div class="field"><label for="notes">Nota (opcional)</label><input data-upper autocapitalize="characters" class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: Inventario de cierre de noviembre"></div>
         <p class="notice">Se guarda una foto del saldo actual. Mientras dure el conteo, evita mover mercancía de esta bodega; lo que se mueva quedará marcado en la revisión.</p>`,
       onSubmit: async (form) => {
         const { count } = await api('/api/counts', { method: 'POST', body: { warehouse_id: Number(form.warehouse_id.value), notes: form.notes.value } })
@@ -1606,11 +1661,11 @@ async function viewCountEntry(main, isCurrent, countId) {
       <div class="field">
         <label for="lot">Lote</label>
         <select class="select" id="lot" name="lot">${lotOptions(itemLots, line?.lot_number)}</select>
-        <input class="input lot-other" id="lot_other" name="lot_other" maxlength="40" placeholder="Escribe el lote tal como aparece" value="${esc(otherLot)}" ${otherLot ? '' : 'hidden'} autocapitalize="characters">
+        <input data-upper class="input lot-other" id="lot_other" name="lot_other" maxlength="40" placeholder="Escribe el lote tal como aparece" value="${esc(otherLot)}" ${otherLot ? '' : 'hidden'} autocapitalize="characters">
       </div>
       ${qtyFieldsHtml({ units: unitsFor(item), line, suggestion: line ? null : item.last_package })}
-      <div class="field"><label for="location">Ubicación (opcional)</label><input class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}" placeholder="Ej: Estante 3"></div>
-      <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" value="${esc(line?.notes || '')}"></div>`
+      <div class="field"><label for="location">Ubicación (opcional)</label><input data-upper autocapitalize="characters" class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}" placeholder="Ej: Estante 3"></div>
+      <div class="field"><label for="notes">Nota (opcional)</label><input data-upper autocapitalize="characters" class="input" id="notes" name="notes" maxlength="200" value="${esc(line?.notes || '')}"></div>`
   }
 
   function bindLotSelect(form) {
@@ -1730,11 +1785,11 @@ async function viewCountEntry(main, isCurrent, countId) {
       submitLabel: line ? 'Guardar cambios' : 'Guardar hallazgo',
       body: `
         ${line ? '' : '<p class="notice">Para productos que encontraste y no aparecen en la lista. El administrador los asignará al producto correcto.</p>'}
-        <div class="field"><label for="finding_name">Nombre en la etiqueta</label><input class="input" id="finding_name" name="finding_name" maxlength="80" autocapitalize="characters" value="${esc(line?.finding_name || '')}" ${line ? 'readonly' : ''}></div>
-        <div class="field"><label for="lot_free">Lote (opcional)</label><input class="input" id="lot_free" name="lot_free" maxlength="40" placeholder="S/N si no tiene" autocapitalize="characters" value="${esc(line && line.lot_number !== 'S/N' ? line.lot_number : '')}"></div>
+        <div class="field"><label for="finding_name">Nombre en la etiqueta</label><input data-upper class="input" id="finding_name" name="finding_name" maxlength="80" autocapitalize="characters" value="${esc(line?.finding_name || '')}" ${line ? 'readonly' : ''}></div>
+        <div class="field"><label for="lot_free">Lote (opcional)</label><input data-upper class="input" id="lot_free" name="lot_free" maxlength="40" placeholder="S/N si no tiene" autocapitalize="characters" value="${esc(line && line.lot_number !== 'S/N' ? line.lot_number : '')}"></div>
         ${qtyFieldsHtml({ units: unitsFor(null), simpleUnits: ['kg', 'g', 'L', 'mL', 'gal', 'und'], line })}
-        <div class="field"><label for="location">Ubicación (opcional)</label><input class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}"></div>
-        <div class="field"><label for="notes">Nota (opcional)</label><input class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: envase sin etiqueta completa" value="${esc(line?.notes || '')}"></div>
+        <div class="field"><label for="location">Ubicación (opcional)</label><input data-upper autocapitalize="characters" class="input" id="location" name="location" maxlength="40" value="${esc(line ? line.location || '' : storeGet('tin-count-location', ''))}"></div>
+        <div class="field"><label for="notes">Nota (opcional)</label><input data-upper autocapitalize="characters" class="input" id="notes" name="notes" maxlength="200" placeholder="Ej: envase sin etiqueta completa" value="${esc(line?.notes || '')}"></div>
         ${line ? '<button class="btn btn-danger btn-block" type="button" id="line-delete">Borrar este registro</button>' : ''}`,
       onOpen: (form) => {
         bindQtyFields(form, null)

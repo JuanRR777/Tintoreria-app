@@ -1,7 +1,7 @@
 /** Login, sesiones por cookie y control de acceso por rol. */
 
 import { HttpError, clientIp, json, readJson } from './http.js'
-import { clampIterations, hashPassword, passwordProblem, randomToken, sha256Hex, verifyPassword } from './crypto.js'
+import { clampIterations, cleanPassword, hashPassword, passwordProblem, randomToken, sha256Hex, verifyPasswordLenient } from './crypto.js'
 import { ROLES, can, permissionsFor } from './roles.js'
 import { audit } from './audit.js'
 
@@ -108,7 +108,7 @@ export async function login(request, env) {
 
   await verifyTurnstile(env, body.turnstile_token, ip)
 
-  if (!username || username.length > 64 || !password || password.length > 128) {
+  if (!username || username.length > 64 || !password.trim() || password.length > 128) {
     throw new HttpError(401, GENERIC_LOGIN_ERROR)
   }
 
@@ -118,7 +118,7 @@ export async function login(request, env) {
   ).bind(username).first()
 
   const configured = clampIterations(env.PBKDF2_ITERATIONS)
-  const check = await verifyPassword(password, user ? user.password_hash : null, configured)
+  const check = await verifyPasswordLenient(password, user ? user.password_hash : null, configured)
   const locked = Boolean(user) && Number(user.locked_active) === 1
   const active = Boolean(user) && Number(user.is_active) === 1
 
@@ -151,7 +151,7 @@ export async function login(request, env) {
   if (check.iterations < configured) {
     statements.push(
       env.DB.prepare('UPDATE web_users SET password_hash = ? WHERE id = ?')
-        .bind(await hashPassword(password, configured), user.id),
+        .bind(await hashPassword(check.matched, configured), user.id),
     )
   }
   await env.DB.batch(statements)
@@ -227,16 +227,16 @@ export async function changeOwnPassword(request, env) {
   const { user, sessionId } = await requireUser(request, env, null, { allowPendingPassword: true })
   const body = await readJson(request)
   const current = String(body.current_password || '')
-  const next = String(body.new_password || '')
+  const next = cleanPassword(body.new_password)
   const configured = clampIterations(env.PBKDF2_ITERATIONS)
-  const check = await verifyPassword(current, user.password_hash, configured)
+  const check = await verifyPasswordLenient(current, user.password_hash, configured)
   if (!check.ok) {
     await audit(env, request, user, 'password_change_failed', 'contraseña actual incorrecta')
     throw new HttpError(400, 'La contraseña actual no es correcta')
   }
   const problem = passwordProblem(next, user.username)
   if (problem) throw new HttpError(400, problem)
-  if (next === current) throw new HttpError(400, 'La nueva contraseña debe ser distinta de la actual')
+  if (next === check.matched) throw new HttpError(400, 'La nueva contraseña debe ser distinta de la actual')
 
   await env.DB.batch([
     env.DB.prepare(

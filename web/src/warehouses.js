@@ -14,7 +14,7 @@ const FIXED_KINDS = new Set(['principal', 'laboratorio'])
 function cleanName(value) {
   const name = String(value || '').trim().replace(/\s+/g, ' ')
   if (name.length < 2 || name.length > 60) throw new HttpError(400, 'El nombre debe tener entre 2 y 60 caracteres')
-  return name
+  return name.toLocaleUpperCase('es-CO')
 }
 
 function cleanOrder(value, fallback) {

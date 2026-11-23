@@ -111,6 +111,16 @@ const nextPassword = strongPassword()
 r = await almacen.req('POST', '/api/auth/password', { current_password: temp, new_password: nextPassword })
 check('almacén cambia su contraseña', r.status === 200, JSON.stringify(r.data))
 
+r = await new Client().login(almacenUser, ` ${nextPassword} \n`)
+check('ingresa aunque la contraseña llegue con espacios o salto de línea (copiada de WhatsApp)', r.status === 200)
+
+const spacedUser = `espacios.${stamp}`
+const spacedPassword = strongPassword()
+r = await admin.req('POST', '/api/users', { username: spacedUser, full_name: 'Prueba Espacios', role: 'consulta', password: `  ${spacedPassword} ` })
+check('crear con espacios alrededor guarda la contraseña sin ellos', r.status === 201)
+r = await new Client().login(spacedUser, spacedPassword)
+check('…y se ingresa con la contraseña exacta', r.status === 200)
+
 r = await almacen.req('GET', '/api/warehouses')
 const names = (r.data.items || []).map((w) => w.name)
 check('almacén ve bodegas Principal y Laboratorio', r.status === 200 && names.includes('Principal') && names.includes('Laboratorio'))
