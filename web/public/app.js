@@ -59,6 +59,21 @@ function initials(name) {
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase()
 }
 
+function fmtTime(value) {
+  if (!value) return ''
+  const date = new Date(`${String(value).replace(' ', 'T')}Z`)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+}
+
+function fmtDateTime(value) {
+  if (!value) return '—'
+  const date = new Date(`${String(value).replace(' ', 'T')}Z`)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const day = date.toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' })
+  return `${day} · ${fmtTime(value)}`
+}
+
 function fmtDate(value) {
   if (!value) return '—'
   const date = new Date(`${String(value).replace(' ', 'T')}Z`)
@@ -537,7 +552,7 @@ function pageHead(title, subtitle, actions = '') {
 // Diálogos
 // ---------------------------------------------------------------------------
 
-function openDialog({ title, body, submitLabel = 'Guardar', onSubmit, onOpen }) {
+function openDialog({ title, body, submitLabel = 'Guardar', cancelLabel = 'Cancelar', onSubmit, onOpen }) {
   const dialog = document.createElement('dialog')
   dialog.innerHTML = `
     <form novalidate>
@@ -550,7 +565,7 @@ function openDialog({ title, body, submitLabel = 'Guardar', onSubmit, onOpen }) 
         ${body}
       </div>
       <div class="dialog-foot">
-        <button type="button" class="btn btn-secondary" data-close>Cancelar</button>
+        <button type="button" class="btn btn-secondary" data-close>${esc(cancelLabel)}</button>
         <button type="submit" class="btn btn-primary">${esc(submitLabel)}</button>
       </div>
     </form>`
@@ -1339,16 +1354,17 @@ async function viewCountEntry(main, isCurrent, countId) {
     <div id="failed-box"></div>
     <div class="search-bar card">
       <input class="input input-search" id="count-search" type="search" placeholder="Buscar por código o nombre" autocomplete="off" spellcheck="false" enterkeyhint="search">
-      <div class="chips" role="group" aria-label="Filtrar productos">
-        <button type="button" class="chip active" data-filter="todos">Todos</button>
-        <button type="button" class="chip" data-filter="pendientes">Sin contar</button>
-        <button type="button" class="chip" data-filter="contados">Contados</button>
+      <div class="chips filter-row">
+        <span class="chips" role="group" aria-label="Filtrar productos">
+          <button type="button" class="chip active" data-filter="todos">Todos</button>
+          <button type="button" class="chip" data-filter="pendientes">Sin contar</button>
+          <button type="button" class="chip" data-filter="contados">Contados</button>
+        </span>
+        <button type="button" class="chip chip-finding" id="finding-new">+ No está en la lista</button>
       </div>
     </div>
     <div class="list item-list" id="count-items"></div>
-    <button class="btn btn-secondary btn-block finding-btn" type="button" id="finding-new">¿No está en la lista? Registrar hallazgo</button>
-    <p class="section-title">Mis registros</p>
-    <div class="card" id="my-lines"></div>`
+    <div class="list item-list finding-rows" id="finding-rows"></div>`
 
   const linesFor = (chemicalId) => lines.filter((l) => l.chemical_id === chemicalId)
   const pendingFor = (chemicalId) => myQueue(countId).filter((q) => q.body.chemical_id === chemicalId)
@@ -1395,45 +1411,170 @@ async function viewCountEntry(main, isCurrent, countId) {
     return query.split(/\s+/).every((word) => hay.includes(word))
   }
 
+  /** Cantidad de un registro en la unidad del producto (los pendientes se calculan aquí). */
+  function recordQty(record, item) {
+    if (!record.pending && record.qty !== undefined && record.qty !== null) return Number(record.qty)
+    const parse = (v) => Number(String(v ?? '').replace(',', '.'))
+    if (record.package_type) {
+      const packed = convertUnits(parse(record.package_count) * parse(record.package_content), record.package_unit, item.unit, item.density)
+      const loose = record.loose_qty ? convertUnits(parse(record.loose_qty), record.loose_unit, item.unit, item.density) : 0
+      return packed === null || loose === null ? null : packed + loose
+    }
+    return convertUnits(parse(record.qty_entered), record.unit_entered, item.unit, item.density)
+  }
+
+  /** Registros del producto, más recientes primero; los que siguen en el celular van arriba. */
+  function recordsFor(item) {
+    const pending = pendingFor(item.chemical_id).map((q) => ({ ...q.preview, pending: true }))
+    const sent = [...linesFor(item.chemical_id)].sort((a, b) => b.id - a.id)
+    return [...pending.reverse(), ...sent].map((r) => ({ ...r, qtyItem: recordQty(r, item) }))
+  }
+
+  function recordChip(record, item) {
+    const when = record.pending ? 'sin enviar' : fmtTime(record.counted_at)
+    return `<span class="reg-chip${record.pending ? ' is-pending' : ''}">${esc(fmtQty(record.qtyItem, unitLabel(item.unit)))} · ${esc(when)}</span>`
+  }
+
   function paintItems() {
     const host = document.getElementById('count-items')
     if (!host) return
     const shown = items.filter(itemMatches).slice(0, 80)
     host.innerHTML = shown.length ? shown.map((item) => {
-      const n = Math.max(item.lines, linesFor(item.chemical_id).length) + pendingFor(item.chemical_id).length
+      const records = recordsFor(item)
+      const n = Math.max(item.lines + pendingFor(item.chemical_id).length, records.length)
       return `
-        <button type="button" class="card item-pick" data-item="${item.chemical_id}">
+        <div class="card item-pick${n ? ' is-counted' : ''}" data-item="${item.chemical_id}" role="button" tabindex="0"
+             aria-label="${esc(item.name)}${n ? `, ${n} registro${n === 1 ? '' : 's'}` : ', sin contar'}">
           <span class="item-pick-text">
             <strong>${esc(item.name)}</strong>
             <span><code>${esc(item.code)}</code> · ${esc(item.unit)}</span>
           </span>
-          <span class="row-tags">
-            ${item.recount ? '<span class="badge badge-warning">Reconteo</span>' : ''}
-            ${n ? `<span class="badge badge-success">${n} registro${n === 1 ? '' : 's'}</span>` : '<span class="badge">Sin contar</span>'}
+          <span class="item-pick-side">
+            <span class="row-tags">
+              ${item.recount ? '<span class="badge badge-warning">Reconteo</span>' : ''}
+              ${n ? `<span class="badge badge-success reg-count" title="${n} registro${n === 1 ? '' : 's'}">${n} R</span>` : '<span class="badge">Sin contar</span>'}
+            </span>
+            ${records.length ? `
+              <span class="reg-chips">
+                ${records.slice(0, 2).map((r) => recordChip(r, item)).join('')}
+                <button type="button" class="reg-more" data-more="${item.chemical_id}">${records.length === 1 ? 'Ver registro' : `Ver todos (${records.length})`}</button>
+              </span>` : ''}
           </span>
-        </button>`
+        </div>`
     }).join('') : '<div class="card empty">No hay productos con ese filtro. Si no está en la lista, regístralo como hallazgo.</div>'
   }
 
-  function paintMine() {
-    const host = document.getElementById('my-lines')
-    if (!host) return
-    const queued = myQueue(countId).map((q) => ({ ...q.preview, pending: true }))
-    const mine = lines.filter((l) => l.mine)
-    const all = [...queued, ...mine]
-    host.innerHTML = all.length ? all.slice(0, 60).map((l) => `
-      <div class="line-item">
-        <div class="line-text">
-          <strong>${esc(l.name || l.finding_name || '')}${l.finding_name && !l.name ? ' <span class="badge badge-info">Hallazgo</span>' : ''}</strong>
-          <span>${esc(lineQtyText(l, l.pending ? null : l.unit))} · lote ${esc(l.lot_number || 'S/N')}${l.location ? ` · ${esc(l.location)}` : ''}</span>
-          <span>${l.pending ? '<span class="badge badge-warning">Sin enviar</span>' : esc(fmtDate(l.counted_at))}</span>
-        </div>
-        ${l.pending ? '' : `<button class="btn btn-ghost btn-sm" type="button" data-edit-line="${l.id}">Editar</button>`}
-      </div>`).join('') : '<p class="empty">Aún no has registrado nada.</p>'
-    host.querySelectorAll('[data-edit-line]').forEach((btn) => {
-      btn.addEventListener('click', () => openLineEditor(lines.find((l) => l.id === Number(btn.dataset.editLine))))
-    })
+  /** Lote que no existía en el sistema para este producto (se creará al aplicar). */
+  function isNewLot(item, record) {
+    const lot = String(record.lot_number || 'S/N').toUpperCase()
+    if (!record.pending && record.lot_id) return false
+    return !(lotsByItem.get(item.chemical_id) || []).some((l) => String(l.lot_number).toUpperCase() === lot)
   }
+
+  const canEditRecord = (r) => !r.pending && r.id && (r.mine || can('count.approve'))
+
+  /** Tarjeta de un registro: quién, cantidad y datos. La usan productos y hallazgos. */
+  function recordCardHtml(r, { qtyText, newLot = false, extraFacts = '' }) {
+    const who = r.counted_by_name || (r.pending || r.mine ? state.user.full_name : 'Sin nombre')
+    const fact = (label, value, extra = '', wide = false) => `<div class="record-fact${wide ? ' is-wide' : ''}"><dt>${esc(label)}</dt><dd>${value}${extra}</dd></div>`
+    return `
+      <article class="record${r.pending ? ' is-pending' : ''}">
+        <header class="record-head">
+          <span class="avatar avatar-sm" aria-hidden="true">${esc(initials(who))}</span>
+          <strong class="record-who">${esc(who)}</strong>
+          ${r.pending ? '<span class="badge badge-warning">Sin enviar</span>' : ''}
+          ${canEditRecord(r) ? `<button type="button" class="btn btn-ghost btn-sm" data-edit-record="${r.id}">Editar</button>` : ''}
+        </header>
+        <div class="record-qty">${esc(qtyText)}</div>
+        <dl class="record-facts">
+          ${fact('Lote', esc(r.lot_number || 'S/N'), newLot ? ' <span class="badge badge-info">Nuevo</span>' : '')}
+          ${fact('Fecha', r.pending ? 'Pendiente de envío' : esc(fmtDateTime(r.counted_at)))}
+          ${r.location ? fact('Ubicación', esc(r.location)) : ''}
+          ${extraFacts}
+          ${r.package_type ? fact('Envases', esc(lineQtyText(r)), '', true) : ''}
+          ${r.notes ? fact('Nota', esc(r.notes), '', true) : ''}
+        </dl>
+      </article>`
+  }
+
+  function bindRecordEdits(dialog, onEdit) {
+    dialog.querySelectorAll('[data-edit-record]').forEach((btn) => btn.addEventListener('click', () => {
+      const line = lines.find((l) => l.id === Number(btn.dataset.editRecord))
+      dialog.close()
+      if (line) onEdit(line)
+    }))
+  }
+
+  function openItemRecords(item) {
+    const records = recordsFor(item)
+    const total = records.reduce((sum, r) => sum + (r.qtyItem || 0), 0)
+    const dialog = openDialog({
+      title: item.name,
+      submitLabel: 'Registrar otro',
+      cancelLabel: 'Cerrar',
+      body: `
+        <p class="dialog-sub"><code>${esc(item.code)}</code> · ${records.length} registro${records.length === 1 ? '' : 's'}</p>
+        <div class="records-total">Total contado <strong>${esc(fmtQty(total, unitLabel(item.unit)))}</strong></div>
+        <div class="records">
+          ${records.map((r) => recordCardHtml(r, { qtyText: fmtQty(r.qtyItem, unitLabel(item.unit)), newLot: isNewLot(item, r) })).join('')}
+        </div>`,
+      onSubmit: async () => { setTimeout(() => openItemEntry(item), 0) },
+    })
+    bindRecordEdits(dialog, openLineEditor)
+  }
+
+  /** Total de un hallazgo en la unidad con que se registró (aún no tiene producto). */
+  function findingQtyText(l) {
+    if (!l.package_type) return fmtQty(l.qty_entered, unitLabel(l.unit_entered))
+    if (!l.pending && l.qty !== undefined && l.qty !== null) return fmtQty(l.qty, unitLabel(l.package_unit))
+    const parse = (v) => Number(String(v ?? '').replace(',', '.'))
+    const packed = parse(l.package_count) * parse(l.package_content)
+    const loose = l.loose_qty ? convertUnits(parse(l.loose_qty), l.loose_unit, l.package_unit, null) : 0
+    return loose === null ? lineQtyText(l) : fmtQty(packed + loose, unitLabel(l.package_unit))
+  }
+
+  function openFindingRecord(l) {
+    const dialog = openDialog({
+      title: l.finding_name,
+      submitLabel: 'Registrar otro hallazgo',
+      cancelLabel: 'Cerrar',
+      body: `
+        <p class="dialog-sub"><span class="badge badge-warning">Hallazgo</span> pendiente de asignar a un producto</p>
+        <p class="notice notice-warning">No está en el catálogo. En la revisión, el administrador lo asigna a un producto (y ahí pasa a su fila verde) o lo descarta.</p>
+        <div class="records">${recordCardHtml(l, { qtyText: findingQtyText(l) })}</div>`,
+      onSubmit: async () => { setTimeout(() => openFindingDialog(), 0) },
+    })
+    bindRecordEdits(dialog, openFindingDialog)
+  }
+
+  /** Hallazgos (productos fuera del catálogo) como filas propias al final de la lista. */
+  function paintFindings() {
+    const host = document.getElementById('finding-rows')
+    if (!host) return
+    const queued = myQueue(countId).filter((q) => !q.body.chemical_id)
+      .map((q) => ({ ...q.preview, pending: true, key: `q:${q.body.client_uuid}` }))
+    const sent = lines.filter((l) => !l.chemical_id).sort((a, b) => b.id - a.id).map((l) => ({ ...l, key: `id:${l.id}` }))
+    findingRecords = [...queued.reverse(), ...sent]
+    host.innerHTML = findingRecords.map((l) => {
+      const when = l.pending ? 'sin enviar' : fmtTime(l.counted_at)
+      const editable = canEditRecord(l)
+      return `
+        <div class="card item-pick is-finding" ${editable ? `data-finding="${l.id}" role="button" tabindex="0"` : ''}>
+          <span class="item-pick-text">
+            <strong>${esc(l.finding_name)}</strong>
+            <span>Hallazgo · lote ${esc(l.lot_number || 'S/N')}${l.location ? ` · ${esc(l.location)}` : ''}${l.counted_by_name ? ` · ${esc(l.counted_by_name)}` : ''}</span>
+          </span>
+          <span class="item-pick-side">
+            <span class="row-tags"><span class="badge badge-warning">Hallazgo</span></span>
+            <span class="reg-chips">
+              <span class="reg-chip is-finding${l.pending ? ' is-pending' : ''}">${esc(findingQtyText(l))} · ${esc(when)}</span>
+              <button type="button" class="reg-more reg-more-finding" data-finding-view="${esc(l.key)}">Ver registro</button>
+            </span>
+          </span>
+        </div>`
+    }).join('')
+  }
+  let findingRecords = []
 
   async function refreshLines() {
     try {
@@ -1444,7 +1585,7 @@ async function viewCountEntry(main, isCurrent, countId) {
     }
     if (!isCurrent()) return
     paintItems()
-    paintMine()
+    paintFindings()
     paintSync()
     paintFailed()
   }
@@ -1488,14 +1629,12 @@ async function viewCountEntry(main, isCurrent, countId) {
   }
 
   function openItemEntry(item) {
-    const existing = [...linesFor(item.chemical_id), ...pendingFor(item.chemical_id).map((q) => ({ ...q.preview, pending: true }))]
     openDialog({
       title: item.name,
       submitLabel: 'Guardar',
       body: `
         ${item.recount ? '<p class="notice notice-warning">Reconteo pedido: cuenta de nuevo todo este producto.</p>' : ''}
-        ${lineFields({ item })}
-        ${existing.length ? `<div class="already"><strong>Ya registrado en este conteo:</strong>${existing.map((l) => `<div>${esc(lineQtyText(l, l.pending ? null : item.unit))} · lote ${esc(l.lot_number)}${l.location ? ` · ${esc(l.location)}` : ''} · ${esc(l.counted_by_name || 'tú')}${l.pending ? ' (sin enviar)' : ''}</div>`).join('')}</div>` : ''}`,
+        ${lineFields({ item })}`,
       onOpen: (form) => {
         bindLotSelect(form)
         const mode = bindQtyFields(form, item)
@@ -1570,9 +1709,20 @@ async function viewCountEntry(main, isCurrent, countId) {
     main.querySelectorAll('[data-filter]').forEach((c) => c.classList.toggle('active', c === chip))
     paintItems()
   }))
-  document.getElementById('count-items').addEventListener('click', (event) => {
-    const btn = event.target.closest('[data-item]')
-    if (btn) openItemEntry(itemById.get(Number(btn.dataset.item)))
+  const itemList = document.getElementById('count-items')
+  itemList.addEventListener('click', (event) => {
+    const more = event.target.closest('[data-more]')
+    if (more) { openItemRecords(itemById.get(Number(more.dataset.more))); return }
+    const row = event.target.closest('[data-item]')
+    if (row) openItemEntry(itemById.get(Number(row.dataset.item)))
+  })
+  itemList.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    if (event.target.closest('[data-more]')) return
+    const row = event.target.closest('[data-item]')
+    if (!row || event.target !== row) return
+    event.preventDefault()
+    openItemEntry(itemById.get(Number(row.dataset.item)))
   })
   function openFindingDialog(line = null) {
     const dialog = openDialog({
@@ -1616,8 +1766,29 @@ async function viewCountEntry(main, isCurrent, countId) {
   }
 
   document.getElementById('finding-new').addEventListener('click', () => openFindingDialog())
+  const findingRows = document.getElementById('finding-rows')
+  const openFindingRow = (event) => {
+    const view = event.target.closest('[data-finding-view]')
+    if (view) {
+      const record = findingRecords.find((f) => f.key === view.dataset.findingView)
+      if (record) openFindingRecord(record)
+      return true
+    }
+    const row = event.target.closest('[data-finding]')
+    if (!row) return false
+    const line = lines.find((l) => l.id === Number(row.dataset.finding))
+    if (line) openFindingDialog(line)
+    return true
+  }
+  findingRows.addEventListener('click', openFindingRow)
+  findingRows.addEventListener('keydown', (event) => {
+    if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[data-finding]')) {
+      event.preventDefault()
+      openFindingRow(event)
+    }
+  })
 
-  const onSync = () => { paintSync(); paintMine(); paintFailed() }
+  const onSync = () => { paintSync(); paintItems(); paintFindings(); paintFailed() }
   document.addEventListener('count-sync', onSync)
   const timer = setInterval(() => { if (myQueue(countId).length) flushQueue() }, 20000)
   const onOnline = () => paintSync()
